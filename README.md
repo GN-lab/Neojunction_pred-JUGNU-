@@ -16,6 +16,12 @@ Neojunction prediction from 307 transcriptomic dataset acquired from Hartwig (Br
 9. Confirm tumor specificity: Confirm tumor specificity by requiring negligible signal in normal tissues (GTEx PSR ≤0.01; in your run all survivors had 0), yielding a tumor-only set (still 1,541). GTEx is the NIH Genotype‑Tissue Expression program that profiles gene expression and splicing across many non‑diseased human tissues from hundreds of donors to link genetic variation to tissue‑specific RNA patterns.
 10. Compile final neojunctions: Compile final neojunctions with per-sample counts, PSR, depth/frequency, and a composite “judge” pass flag—ready for neoantigen prediction and immunogenicity ranking (1,541 total).
 
+<img width="3840" height="2760" alt="phase2_flowchart" src="https://github.com/user-attachments/assets/abef3a8b-758e-4231-afbe-dca1c4b94b68" />
+
+
+
+<img width="3840" height="3300" alt="phase3_flowchart" src="https://github.com/user-attachments/assets/54e7a656-c4b2-4026-b4fd-553f866c0939" />
+
 
 **STAR aligner** 
 
