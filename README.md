@@ -41,7 +41,9 @@ ________________________________________________________________________________
 2. Run MHCflurry for affinity, processing, and presentation predictions: Execute the MHCflurry algorithm—a machine learning tool trained on mass spectrometry and binding assay data—to predict each peptide-HLA pair's binding affinity (IC50 value in nanomolar, where <500 nM indicates strong binders), proteasomal processing efficiency (cleavage likelihood at flanks), and overall presentation score (composite metric integrating binding, processing, and stability); process across all patient HLAs in parallel (yielding 342,344 total predictions for the cohort, covering 79,114 unique peptides against 5 common alleles). MHCflurry outperforms traditional netMHC tools by leveraging pan-allele models, providing robust scores for rare HLAs and reducing false positives in neoantigen discovery.
 3. Construct neoantigen presence/absence matrix: Aggregate the MHCflurry outputs into a binary matrix indicating neoantigen presence (peptides passing a presentation score threshold, e.g., top percentile or <500 nM binding with favorable processing) across 312 patient samples, linking back to the 945 unique neojunctions; include binding scores, HLA matches, and per-sample counts to enable downstream analyses like tumor specificity and immunogenicity ranking (42,157 putative neoantigens identified). This matrix facilitates cohort-level insights, such as neoantigen burden per patient and shared epitopes, while flagging high-confidence candidates for validation in T-cell assays or vaccine design.
 
-END______________________________________________________________________________________________________
+______________________________________________________________________________________________________
+END
+______________________________________________________________________________________________________
 
 **STAR aligner** 
 
