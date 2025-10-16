@@ -2,26 +2,19 @@
 
 Neojunction prediction from 307 transcriptomic dataset acquired from Hartwig (Breast sample)
 
-## 1. Neojunction calling
-The characterization of neojunctions is first performed by evaluating splice sites in breat metastatic rna samples derived from Hartwig and filtering against splice sites with putative read expression in a normal tissue repository, GTEx (n=9166).
+<img width="2400" height="1600" alt="image-2" src="https://github.com/user-attachments/assets/bfa946b3-b6d5-4c85-81ec-61719f041758" />
 
-### Step 01. Tumor purity
-From meta data files, remove samples with a tumor purity of lower than 60%. 
-
-### Step 02. Protein-coding genes
-Identify and filter for protein-coding genes with a corresponding GTF file (Homo_sapiens.GRCh37.87.chr.gtf in our study). This will generate a dataframe of protein-encoding genes and their respectie coordinates.
-
-### Step 03. TPM filter > 10
-From tumor samples with a tumor purity > 0.60, identify transcripts with TPM values > 10.
-
-### Step 04. Characterize annotated splicing junctions
-Next characterize all splicing junctions that are identified at alignment. From STAR aligner's SJ.out.tab files, the splice junction site count data can be extracted. Based on Step 02 and Step 03, select for splice sites that are found in protein-coding genes with a TPM filter > 10.
-
-### Step 05. Extract putative non-annotated splice junctions
-Filter out annotated splicing junctions in the corresponding GTF file (sjdbList.fromGTF.out.tab) to identify non-annotated splicing junctions. Note that in this step, different GTF versions will affect the characterization of neojunctions that are identified. At the time of this code being used, our GRCh37.87 GTF sj.out.tab file version was GENCODE v33. 
-
-### Step 06. Prepare splicing junction overlap table
-
+This flowchart explains the process in detail:
+Select high-purity tumors: Apply a tumor purity threshold of ≥0.60 to obtain 40 high-purity tumors, which are used for all downstream counts and PSR calculations. (Positive Sample Rate (PSR): fraction of tumor samples with a given junction supported by ≥10 reads; for 40 samples, PSR = number of positive samples ÷ 40 (threshold used: PSR ≥0.1 for recurrence).
+Extract normal spliced junctions: Extract those spliced junctions which are considered as normal through the GTF file (150k+ transcripts, 20k gene).
+Filter for highly expressed transcripts: Filter out those with highly expressed transcripts (e.g., only those transcripts which have >=10 TPM) on the basis of their read counts. Hence, making sure that we are choosing only those junctions where the most transcriptions happened, so downstream calls occur in active genes (2,828 transcripts, 2,206 genes).
+Derive annotated splice junctions: Derive annotated (normal) splice junctions by connecting consecutive exons from those expressed transcripts; this creates the reference blacklist of normal junctions (≈41k total, 2,737 unique, 2.2k genes) to subtract later.
+Process tumor splice-junctions: Load nfcore-rna seq generated SJ.out.tab files and subtract the annotated set; retain non-annotated candidates that have ≥10 supporting reads in at least one sample and fall in protein-coding regions (16,608 candidates; ≈1.6% novel rate).
+Apply PSR threshold for recurrence: Keep junctions present in ≥0.1 PSR of tumor samples (≥4/40 with ≥10 reads), which reduces noise and focuses on shared tumor splicing events (3,368 retained junctions).
+Map to genes/transcripts: Map each retained junction to genes/transcripts (overlap with GTF features) ≈3k unique overlaps across ≈300 genes.
+Apply reliability filtering: Apply reliability (judge) filtering that requires sufficient read count, splice-site depth, and junction frequency; only junctions that pass all criteria are retained (1,541 survivors across ≈200 genes).
+Confirm tumor specificity: Confirm tumor specificity by requiring negligible signal in normal tissues (GTEx PSR ≤0.01; in your run all survivors had 0), yielding a tumor-only set (still 1,541). GTEx is the NIH Genotype‑Tissue Expression program that profiles gene expression and splicing across many non‑diseased human tissues from hundreds of donors to link genetic variation to tissue‑specific RNA patterns.
+Compile final neojunctions: Compile final neojunctions with per-sample counts, PSR, depth/frequency, and a composite “judge” pass flag—ready for neoantigen prediction and immunogenicity ranking (1,541 total).
 
 
 **STAR aligner** 
