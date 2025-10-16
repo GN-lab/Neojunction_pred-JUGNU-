@@ -2,7 +2,7 @@
 
 Neojunction prediction from 307 transcriptomic dataset acquired from Hartwig (Breast sample)
 
-<img width="2400" height="1600" alt="image-2" src="https://github.com/user-attachments/assets/bfa946b3-b6d5-4c85-81ec-61719f041758" />
+<img width="4170" height="7770" alt="neojunction_flowchart_clean" src="https://github.com/user-attachments/assets/c687456a-abdc-4bf9-91dc-a9644e8bfac0" />
 
 ***This flowchart explains the process in detail:
 1. Select high-purity tumors: Apply a tumor purity threshold of ≥0.60 to obtain 40 high-purity tumors, which are used for all downstream counts and PSR calculations. (Positive Sample Rate (PSR): fraction of tumor samples with a given junction supported by ≥10 reads; for 40 samples, PSR = number of positive samples ÷ 40 (threshold used: PSR ≥0.1 for recurrence).
