@@ -42,7 +42,7 @@ ________________________________________________________________________________
 3. Construct neoantigen presence/absence matrix: Aggregate the MHCflurry outputs into a binary matrix indicating neoantigen presence (peptides passing a presentation score threshold, e.g., top percentile or <500 nM binding with favorable processing) across 312 patient samples, linking back to the 945 unique neojunctions; include binding scores, HLA matches, and per-sample counts to enable downstream analyses like tumor specificity and immunogenicity ranking (42,157 putative neoantigens identified). This matrix facilitates cohort-level insights, such as neoantigen burden per patient and shared epitopes, while flagging high-confidence candidates for validation in T-cell assays or vaccine design.
 
 ______________________________________________________________________________________________________
-END
+SJ.out.tab file generating prameters used :-
 ______________________________________________________________________________________________________
 
 **STAR aligner** 
@@ -80,6 +80,10 @@ Specifies the minimum allowed intron length (20 bases) for splice junctions. Ver
 
 --alignIntronMax 1000000
 Sets the maximum allowed intron length (1,000,000 bases). This limits extremely long introns that could be biologically implausible or mapping artifacts.
+
+______________________________________________________________________________________________________
+Results :-
+______________________________________________________________________________________________________
 
 <img width="2400" height="1800" alt="figure_5i_fs_if_boxplot_20250928" src="https://github.com/user-attachments/assets/afada8f3-e0b4-4ad9-8843-6276ad1510eb" />
 
