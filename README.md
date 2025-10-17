@@ -3,7 +3,7 @@
 Neojunction prediction from 307 transcriptomic dataset acquired from Hartwig (Breast sample)
 
 ______________________________________________________________________________________________________
-Phase 1: Neojunction prediction pipeline 
+Phase 1: Neojunction detection pipeline 
 ______________________________________________________________________________________________________
 
 <img width="4170" height="7770" alt="neojunction_flowchart_clean" src="https://github.com/user-attachments/assets/5ab05221-1258-40fa-bcc4-8da275d0d7f4" />
