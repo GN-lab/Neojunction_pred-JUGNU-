@@ -1,6 +1,5 @@
 # JUGNU (Junction Guided Neoantigen Uncoverer)
-
-[Uploading JUGNU_Pipeline.pdf…]()
+[JUGNU_Pipeline.pdf](https://github.com/user-attachments/files/29975114/JUGNU_Pipeline.pdf)
 
 ______________________________________________________________________________________________________
 Phase 1: Neojunction detection pipeline 
