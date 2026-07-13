@@ -3,7 +3,7 @@
 # ------------------------- Core Configuration --------------------------
 
 # Working directory (SSNIP root) - update if needed
-export WORKDIR="/data/rds/DMP/UCEC/EVOLIMMU/csalas_rds/gaurav_rds/Neojuction_pred/SSNIP"
+export WORKDIR=""
 
 # Input and output directories
 export INPUT_DIR="${WORKDIR}/0_Input_Files"  # Purity metadata, GTF, TPM files, etc.
@@ -19,14 +19,14 @@ done
 export GTF_FILE="${INPUT_DIR}/genome.gtf"  # GTF for protein-coding extraction (Step 02)
 export PURITY_FILE="${INPUT_DIR}/mapped_sample_purity.txt"  # Tumor purity metadata (Step 01)
 export TPM_FILE="${INPUT_DIR}/transcript_tpm_matrix.tsv"  # Transcript-level TPM matrix (Step 03; use gene_tpm_matrix.tsv if gene-level needed)
-export STAR_SJ_DIR="/data/rds/DMP/UCEC/EVOLIMMU/csalas_rds/gaurav_rds/nextflow_rnaseq/output_hartwig/star_salmon/log"  # STAR SJ.out.tab files (Step 04) - fixed double slash
-export GTEX_FILE="${INPUT_DIR}/gtex_junctions.txt"  # For GTEx overlap (Step 08)
-export GTEX_META_PATH="${INPUT_DIR}"  # GTEx metadata (Step 08)
+export STAR_SJ_DIR="../output_hartwig/star_salmon/log"  # STAR SJ.out.tab files (Step 04) - fixed double slash
+export GTEX_FILE="${INPUT_DIR}"  # GTEx metadata (Step 08)
 export GTEX_ANNOTATION_PATH="${INPUT_DIR}"  # GTEx GTF (Step 09)
 export META_FILES_PATH="${INPUT_DIR}"  # Sample TPM matrix (Step 10)
 export EXTERNAL_PATH="${INPUT_DIR}"  # sjdbList.fromGTF.out.tab files (Step 11)
 export PATH_TO_FASTA_UNIPROT="${INPUT_DIR}" # UP000005640_9606.fasta file (Step 12)
-export HLATHENA_OUTPUT_PATH="${OUTPUT_DIR}" # results of step 12 
+export HLATHENA_OUTPUT_PATH="${OUTPUT_DIR}" # results of step 12
+export OPTITYPE_OUTPUT_DIR="../nextflow_HLAtyping/output_hartwig/optitype"
 
 # Thresholds (from SSNIP README)
 export MIN_PURITY=0.60  # Tumor purity threshold (Step 01)
@@ -43,12 +43,15 @@ export MIN_SAMPLES_PCT=0.10  # Minimum samples percentage for "public" junctions
 export MAX_GTEX_FREQUENCY=0.01  # Maximum GTEx frequency
 
 # R environment
-export R_LIBS_USER="/data/rds/DMP/UCEC/EVOLIMMU/csalas_rds/gaurav_rds/R_libs"  # Your R library path
+export R_LIBS_USER="/data/rds/DMP/UCEC/EVOLIMMU/graichand/R_libs"  # Your R library path
 
 # Script directories
 export NEOJUNCTION_DIR="${WORKDIR}/1_Neojunction_Calling"
 export NEOPEPTIDE_DIR="${WORKDIR}/2_Neopeptide_Prediction"
 export PRESENTATION_DIR="${WORKDIR}/3_Presentation_Prediction"
+# Path to the master pipeline driver itself (needed so child SLURM jobs can
+# call back into it for validation, since SLURM stages a copy elsewhere)
+export MASTER_SCRIPT_PATH="${WORKDIR}/master.sh"
 
 # Log and checkpoint dirs
 mkdir -p "${WORKDIR}/logs" "${WORKDIR}/.checkpoints"
