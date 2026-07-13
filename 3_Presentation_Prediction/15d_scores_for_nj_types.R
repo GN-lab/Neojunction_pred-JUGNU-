@@ -80,8 +80,8 @@ if (file.exists(CACHE_ALL_MAP)) {
   df_all_map <- readRDS(CACHE_ALL_MAP)
 } else {
   cat("Computing df_all_map (this will take time)...\n")
-
-  # Load MHCflurry top files (14c output -- one best allele per peptide)
+  
+  # Load MHCflurry output files as data.table
   mf_patterns <- c("^mhcflurry_08mer_top_\\d{8}\\.tsv$",
                    "^mhcflurry_09mer_top_\\d{8}\\.tsv$",
                    "^mhcflurry_10mer_top_\\d{8}\\.tsv$",
@@ -92,8 +92,13 @@ if (file.exists(CACHE_ALL_MAP)) {
   if ("mhcflurry_affinity" %in% names(df_all_map))
     setnames(df_all_map, "mhcflurry_affinity", "mhcflurry_binding_affinity")
 
-  # WT filter -- remove any peptide+allele also found in WT MHCflurry predictions
-  # (presence alone disqualifies, regardless of score)
+  ###########################################################################
+  #  WT FILTER + BED FILES (added) -----------------------------------------
+  ###########################################################################
+
+  # 1. WT filter -- remove any ALT peptide+allele found in WT predictions.
+  #    No score threshold: presence alone disqualifies (the sequence exists
+  #    in the normal self repertoire regardless of how strongly it binds).
   wt_patterns <- c("^08mers_flank_mhcflurry_wt_[0-9_]+\\.csv$",
                    "^09mers_flank_mhcflurry_wt_[0-9_]+\\.csv$",
                    "^10mers_flank_mhcflurry_wt_[0-9_]+\\.csv$",
@@ -113,20 +118,17 @@ if (file.exists(CACHE_ALL_MAP)) {
         "| retained", nrow(df_all_map), "tumor-specific rows\n")
     rm(wt_set)
   } else {
-    cat("[WARNING] WT files not found -- skipping WT filter\n")
+    cat("[WARNING] WT prediction files not found -- skipping WT filter\n")
   }
 
-  ###########################################################################
-  #  BED FILES (done first -- fast) -----------------------------------------
-  ###########################################################################
-  # Format: ENST_ID / AA_START / AA_END / PEPTIDE / HLA_ALLELE
-  # Source: 14c top files (best allele per peptide) filtered at <=500nM affinity
-  # ALT bed: tumor-specific peptides only (after WT filter above)
-  # WT bed:  native self immunopeptidome
-
+  # 2. Bed files -- written now while we have the data, before anything else.
+  #    Format: ENST_ID / AA_START / AA_END / PEPTIDE / HLA_ALLELE
+  #    Source: 14c top files (best allele per peptide) at <=500nM affinity.
+  #    ALT bed: tumor-specific peptides only (after WT filter above).
+  #    WT bed:  native self immunopeptidome from 14c WT top files.
   AFFINITY_THRESHOLD <- 500  # nM
 
-  coord_map_files_bed <- c(
+  coord_map_files <- c(
     "2023_0812_peptide_coordinate_map_08mers.tsv",
     "2023_0812_peptide_coordinate_map_09mers.tsv",
     "2023_0812_peptide_coordinate_map_10mers.tsv",
@@ -134,17 +136,15 @@ if (file.exists(CACHE_ALL_MAP)) {
   )
 
   make_bed <- function(pep_dt, coord_map, label) {
-    # pep_dt must have: peptide, n_flank, c_flank, allele
-    # coord_map must have: n_mer, n_flank, c_flank, enst.model, aa_start, aa_end
     joined <- merge(pep_dt, coord_map,
                     by.x = c("peptide","n_flank","c_flank"),
                     by.y = c("n_mer","n_flank","c_flank"),
-                    all.x = TRUE, allow.cartesian = TRUE)
+                    all.x = TRUE, allow.cartesian = FALSE)
     bed <- unique(joined[!is.na(enst.model), .(
-      ENST_ID   = enst.model,
-      AA_START  = aa_start,
-      AA_END    = aa_end,
-      PEPTIDE   = peptide,
+      ENST_ID    = enst.model,
+      AA_START   = aa_start,
+      AA_END     = aa_end,
+      PEPTIDE    = peptide,
       HLA_ALLELE = allele
     )])
     setorder(bed, ENST_ID, AA_START)
@@ -154,32 +154,30 @@ if (file.exists(CACHE_ALL_MAP)) {
     bed
   }
 
-  if (all(file.exists(coord_map_files_bed))) {
-    coord_map_bed <- rbindlist(lapply(coord_map_files_bed, fread, na.strings = c("", "NA")),
-                               use.names = TRUE, fill = TRUE)
-    setnames(coord_map_bed, c("ctex_up","ctex_dn"), c("n_flank","c_flank"))
+  if (all(file.exists(coord_map_files))) {
+    coord_map <- rbindlist(lapply(coord_map_files, fread, na.strings = c("", "NA")),
+                           use.names = TRUE, fill = TRUE)
+    setnames(coord_map, c("ctex_up","ctex_dn"), c("n_flank","c_flank"))
 
-    # ALT filtered bed -- tumor-specific peptides from df_all_map, <=500nM
+    # ALT bed
     if ("mhcflurry_binding_affinity" %in% names(df_all_map)) {
       alt_peps <- df_all_map[mhcflurry_binding_affinity <= AFFINITY_THRESHOLD,
                               .(peptide, n_flank, c_flank, allele)]
     } else {
       alt_peps <- df_all_map[, .(peptide, n_flank, c_flank, allele)]
-      cat("[WARNING] mhcflurry_binding_affinity not found -- using all ALT peptides\n")
     }
-    alt_bed <- make_bed(alt_peps, coord_map_bed, "ALT filtered")
+    alt_bed <- make_bed(alt_peps, coord_map, "ALT filtered")
     fwrite(alt_bed, paste0("immunopeptidome_alt_filtered_", current_date, ".bed"),
            sep = "\t", col.names = TRUE, quote = FALSE)
     cat("Wrote immunopeptidome_alt_filtered_", current_date, ".bed\n", sep = "")
     rm(alt_peps, alt_bed)
 
-    # WT native bed -- from 14c WT top files, <=500nM
+    # WT bed from 14c WT top files
     wt_top_pats <- c("^mhcflurry_08mer_wt_top_[0-9]{8}\\.tsv$",
                      "^mhcflurry_09mer_wt_top_[0-9]{8}\\.tsv$",
                      "^mhcflurry_10mer_wt_top_[0-9]{8}\\.tsv$",
                      "^mhcflurry_11mer_wt_top_[0-9]{8}\\.tsv$")
     wt_top_files <- tryCatch(lapply(wt_top_pats, latest_file), error = function(e) NULL)
-
     if (!is.null(wt_top_files)) {
       wt_top <- rbindlist(lapply(wt_top_files, fread, na.strings = c("", "NA")),
                           use.names = TRUE, fill = TRUE)
@@ -187,9 +185,6 @@ if (file.exists(CACHE_ALL_MAP)) {
         setnames(wt_top, "mhcflurry_affinity", "mhcflurry_binding_affinity")
       wt_top <- wt_top[!is.na(mhcflurry_binding_affinity) &
                          mhcflurry_binding_affinity <= AFFINITY_THRESHOLD]
-      cat("WT top after", AFFINITY_THRESHOLD, "nM filter:", nrow(wt_top), "rows\n")
-
-      # WT coordinate map from all_iterations files
       wt_nmer_files <- c(
         "2023_0802_all_iterations_wt_list_08mers.tsv",
         "2023_0802_all_iterations_wt_list_09mers.tsv",
@@ -203,7 +198,6 @@ if (file.exists(CACHE_ALL_MAP)) {
         wt_coord[, n_flank := stringr::str_pad(ifelse(is.na(n_flank),"",n_flank),30,"left", "-")]
         wt_coord[, c_flank := stringr::str_pad(ifelse(is.na(c_flank),"",c_flank),30,"right","-")]
         rm(wt_nmer_dt); gc()
-
         wt_peps <- wt_top[, .(peptide, n_flank, c_flank, allele)]
         wt_bed  <- make_bed(wt_peps, wt_coord, "WT native")
         fwrite(wt_bed, paste0("immunopeptidome_wt_native_", current_date, ".bed"),
@@ -216,12 +210,16 @@ if (file.exists(CACHE_ALL_MAP)) {
     } else {
       cat("[WARNING] 14c WT top files not found -- skipping WT native bed\n")
     }
-    rm(coord_map_bed); gc()
+    rm(coord_map); gc()
   } else {
     cat("[WARNING] Coordinate map files not found -- skipping bed files\n")
   }
 
   ###########################################################################
+  #  END OF NEW ADDITIONS -- original script continues below ---------------
+  ###########################################################################
+
+  # Load MHCflurry input files as data.table and deduplicate
   input_patterns <- c("^08mer_mhcflurry_input_.*\\.csv$",
                       "^09mer_mhcflurry_input_.*\\.csv$",
                       "^10mer_mhcflurry_input_.*\\.csv$",
@@ -236,73 +234,52 @@ if (file.exists(CACHE_ALL_MAP)) {
   setkey(df_input, peptide, allele)
   df_all_map <- df_all_map[df_input, nomatch = NA]
   
-  # Fast junction mapping via coordinate map join (replaces slow substring match)
-  # The coordinate map (written by Step 12) keys each peptide+flank combination
-  # directly to its junc.id -- no grep needed, just a table join.
-  coord_map_files <- c(
-    "2023_0812_peptide_coordinate_map_08mers.tsv",
-    "2023_0812_peptide_coordinate_map_09mers.tsv",
-    "2023_0812_peptide_coordinate_map_10mers.tsv",
-    "2023_0812_peptide_coordinate_map_11mers.tsv"
-  )
-
-  if (all(file.exists(coord_map_files))) {
-    coord_map <- rbindlist(lapply(coord_map_files, fread, na.strings = c("", "NA")),
-                           use.names = TRUE, fill = TRUE)
-    # coord_map uses ctex_up/ctex_dn; df_all_map uses n_flank/c_flank
-    setnames(coord_map, c("ctex_up","ctex_dn"), c("n_flank","c_flank"))
-    coord_map <- unique(coord_map[, .(n_mer, n_flank, c_flank, junc.id)])
-
-    df_all_map <- merge(df_all_map, coord_map,
-                        by.x = c("peptide","n_flank","c_flank"),
-                        by.y = c("n_mer","n_flank","c_flank"),
-                        all.x = TRUE)
-    cat("Attached junc.id to", sum(!is.na(df_all_map$junc.id)),
-        "of", nrow(df_all_map), "rows via coordinate map\n")
-    rm(coord_map); gc()
-  } else {
-    cat("[WARNING] Coordinate map files not found -- falling back to substring match (slow).\n")
-    df_mapping <- fread(mapping_file)
-    cl <- makeCluster(detectCores() - 1)
-    clusterExport(cl, c("df_mapping"), envir = environment())
-    registerDoParallel(cl)
-    chunk_size <- 10000
-    num_chunks <- ceiling(nrow(df_all_map) / chunk_size)
-    mapping_results <- list()
-    for (chunk in 1:num_chunks) {
-      start <- (chunk - 1) * chunk_size + 1
-      end <- min(chunk * chunk_size, nrow(df_all_map))
-      chunk_pep <- df_all_map$peptide[start:end]
-      chunk_results <- foreach(p = chunk_pep, .combine = rbind,
-                               .packages = c("stringr","data.table")) %dopar% {
-        match_idx <- which(str_detect(df_mapping$aa.seq.alt, fixed(p)))[1]
-        if (is.na(match_idx)) {
-          data.frame(junc.id="Unknown", type="Unknown", fs="Unknown", stringsAsFactors=FALSE)
-        } else {
-          aa_change <- df_mapping$aa.change[match_idx]
-          fs_d <- ifelse(str_detect(aa_change,"shift|fs") |
-                           (df_mapping$ln.diff[match_idx] %% 3 != 0), "fs", "in-frame")
-          data.frame(junc.id=df_mapping$junc.id[match_idx],
-                     type=df_mapping$type[match_idx], fs=fs_d, stringsAsFactors=FALSE)
-        }
-      }
-      mapping_results[[chunk]] <- chunk_results
-      cat(sprintf("Chunk %d/%d\n", chunk, num_chunks))
-    }
-    stopCluster(cl)
-    mapping_results <- rbindlist(mapping_results)
-    df_all_map[, c("junc.id","type","fs") := mapping_results]
-  }
-
-  # Get type and fs from mapping file via junc.id join (fast)
+  # Fast junction mapping via coordinate map (replaces slow substring match)
+  mapping_file <- latest_file("^.*complete_list_all_mers\\.tsv$")
+  cat("Mapping file:", mapping_file, "\n")
   df_mapping <- fread(mapping_file)
-  map_lookup <- unique(df_mapping[, .(junc.id, type,
-                                       fs = fifelse(grepl("shift|fs", aa.change) |
-                                                      (ln.diff %% 3 != 0), "fs", "in-frame"))])
-  df_all_map <- merge(df_all_map, map_lookup, by = "junc.id", all.x = TRUE)
-  df_all_map[is.na(type), type := "OTHERS"]
-  df_all_map[is.na(fs),   fs   := "in-frame"]
-  cat("Junction type/fs mapped for", sum(!is.na(df_all_map$type)), "rows\n")
+
+  if ("junc.id" %in% names(df_all_map)) {
+    # Already have junc.id from coordinate map -- just look up type and fs
+    map_lookup <- unique(df_mapping[, .(
+      junc.id,
+      type,
+      fs = fifelse(grepl("shift|fs", aa.change) | (ln.diff %% 3 != 0), "fs", "in-frame")
+    )])
+    df_all_map <- merge(df_all_map, map_lookup, by = "junc.id", all.x = TRUE)
+    cat("Junction type/fs mapped via junc.id join\n")
+  } else {
+    # Build junc.id lookup from coordinate map first
+    coord_map_files2 <- c(
+      "2023_0812_peptide_coordinate_map_08mers.tsv",
+      "2023_0812_peptide_coordinate_map_09mers.tsv",
+      "2023_0812_peptide_coordinate_map_10mers.tsv",
+      "2023_0812_peptide_coordinate_map_11mers.tsv"
+    )
+    if (all(file.exists(coord_map_files2))) {
+      cm2 <- rbindlist(lapply(coord_map_files2, fread, na.strings = c("","NA")),
+                       use.names = TRUE, fill = TRUE)
+      setnames(cm2, c("ctex_up","ctex_dn"), c("n_flank","c_flank"))
+      # One junc.id per peptide+flank combination
+      cm2 <- cm2[, .(junc.id = junc.id[1]), by = .(n_mer, n_flank, c_flank)]
+      df_all_map <- merge(df_all_map, cm2,
+                          by.x = c("peptide","n_flank","c_flank"),
+                          by.y = c("n_mer","n_flank","c_flank"),
+                          all.x = TRUE)
+      map_lookup <- unique(df_mapping[, .(
+        junc.id,
+        type,
+        fs = fifelse(grepl("shift|fs", aa.change) | (ln.diff %% 3 != 0), "fs", "in-frame")
+      )])
+      df_all_map <- merge(df_all_map, map_lookup, by = "junc.id", all.x = TRUE)
+      cat("Attached junc.id to", sum(!is.na(df_all_map$junc.id)),
+          "of", nrow(df_all_map), "rows via coordinate map\n")
+      rm(cm2); gc()
+    } else {
+      cat("[WARNING] Coordinate map files not found -- junc.id/type/fs will be Unknown\n")
+      df_all_map[, c("junc.id","type","fs") := .("Unknown","OTHERS","in-frame")]
+    }
+  }
   
   # FIX: Calculate percentile from binding affinity (since column doesn't exist in new files)
   cat("Calculating binding affinity percentiles...\n")
@@ -695,33 +672,24 @@ setcolorder(neo_matrix, c("neo_id", "peptide", "junc.id", "hla_allele", "score_a
 
 
 # Fast per-sample matrix using dcast (replaces slow nested for loop)
-# melt count_neo to long, join scores, dcast back to wide -- seconds not days
-cat("Building per-sample score matrix (fast)...\n")
-
-count_long <- melt(count_neo, id.vars = "junc.id",
+cat("Mapping scores to samples (fast)...\n")
+count_long <- melt(as.data.table(count_neo), id.vars = "junc.id",
                    variable.name = "sample", value.name = "count")
 count_long[, sample := sub("\\.$", "", as.character(sample))]
 count_long <- count_long[count > 0]
 
-# Join neoantigen scores via junc.id
-setkey(top_neo, junc.id)
-setkey(count_long, junc.id)
-score_long <- merge(count_long, top_neo[, .(junc.id, neo_id, score_average)],
+score_long <- merge(count_long,
+                    top_neo[, .(junc.id, neo_id, score_average)],
                     by = "junc.id", allow.cartesian = TRUE)
-
-# Cast to wide matrix
 score_wide <- dcast(score_long, neo_id ~ sample,
                     value.var = "score_average",
                     fun.aggregate = max, fill = NA_real_)
 
-# Merge metadata back
 neo_matrix <- merge(top_neo[, .(neo_id, peptide, junc.id, hla_allele, score_average,
                                   mhcflurry_affinity_percentile, mhcflurry_binding_affinity,
                                   mhcflurry_presentation_score, type, fs, shared)],
                     score_wide, by = "neo_id", all.x = TRUE)
 setDT(neo_matrix)
-
-# Ensure all sample columns present
 missing_samples <- setdiff(sample_names, colnames(neo_matrix))
 if (length(missing_samples) > 0) neo_matrix[, (missing_samples) := NA_real_]
 setcolorder(neo_matrix, c("neo_id","peptide","junc.id","hla_allele","score_average",
