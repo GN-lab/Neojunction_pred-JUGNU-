@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ssnip_driver
+#SBATCH --job-name=JUGNU_driver
 #SBATCH --partition=compute
 #SBATCH --cpus-per-task=24
 #SBATCH --mem-per-cpu=8042
@@ -24,7 +24,7 @@ WORKDIR="$(pwd)"
 # Rather than hardcoding a filename here (which breaks the moment you
 # rename/move this file, as just happened), MASTER_SCRIPT_PATH is read from
 # config.sh -- set it there once, e.g.:
-#   export MASTER_SCRIPT_PATH="/data/rds/DMP/UCEC/EVOLIMMU/graichand/Neojuction_pred/SSNIP/master.sh"
+#   export MASTER_SCRIPT_PATH="/data/JUGNU/master.sh"
 # and you never need to touch this file again if you rename/move it.
 if [[ -z "${MASTER_SCRIPT_PATH:-}" ]]; then
   # config.sh may not be sourced yet this early -- source it now just to
@@ -42,7 +42,7 @@ fi
 #  SELF-DISPATCH: this same file is what runs *inside* every SLURM step's
 #  --wrap command to check the step's output before the checkpoint is
 #  touched. Keeps everything in one script instead of a separate validator
-#  file. Normal `sbatch run_ssnip_pipeline_master.sh` submissions never hit
+#  file. Normal `sbatch master.sh` submissions never hit
 #  these branches -- only `bash "$SCRIPT_PATH" __validate_*__ ...` calls do.
 ###############################################################################
 
@@ -229,7 +229,7 @@ module load Mamba/23.1.0-0
 source /data/scratch/DMP/UCEC/EVOLIMMU/graichand/miniconda3/etc/profile.d/conda.sh
 conda activate /data/rds/DMP/UCEC/EVOLIMMU/graichand/.conda_envs/neojunction_viz/
 
-echo "=== Submitting SSNIP Pipeline (dependency-driven, 2 phases, self-validating) ==="
+echo "=== Submitting JUGNU Pipeline (dependency-driven, 2 phases, self-validating) ==="
 
 for f in "${GTF_FILE}" "${PURITY_FILE}" "${TPM_FILE}" "${STAR_SJ_DIR}" "${GTEX_FILE}"; do
   [[ -e "$f" ]] || { echo "[ERROR] Missing required file/directory: $f" >&2; exit 1; }
