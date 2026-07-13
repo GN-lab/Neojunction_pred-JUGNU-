@@ -1,6 +1,6 @@
 #!/usr/bin/env Rscript
 # Title: "Step 12: Generate AA n-mers from Predicted AA Sequences"
-# September 26, 2025 | Gaurav Raichand | The Institute of Cancer Research
+# December 04, 2025 | Gaurav Raichand | The Institute of Cancer Research
 
 # Purpose: The previous step generated all of the predicted amino acid sequences that would be generated
 #          from the neojunctions. This step will generate all of the predicted n-mers (from 8-mers to 11-mers),
@@ -49,10 +49,14 @@ if ("tx" %in% colnames(tpm)) {
   warning("'tx' column not found—check your TPM file headers.")
 }
 
-# From Step 01: List of Patients
-setwd(directory_01)
-filename_tcga = "Patient_List_Post_TumorPurity_Filter_0.60.txt"
-tcga = read_tsv(filename_tcga, na = c("", "NA"))
+# From TPM header: Get ACTUAL sample names
+tpm_colnames <- colnames(tpm)[-(1:2)]  # Skip 'tx' and 'gene_id' columns
+message("[INFO] Found ", length(tpm_colnames), " samples in TPM matrix")
+message("[INFO] First 5 samples: ", paste(head(tpm_colnames, 5), collapse = ", "))
+
+# Create tcga dataframe from TPM samples
+tcga <- data.frame(case = tpm_colnames)
+message("[INFO] Using ", nrow(tcga), " samples from TPM file")
   
 # From Step 11: List of Predicted AA Sequences
 setwd(directory_11)
@@ -79,7 +83,7 @@ if (length(duplicated_cols_after) > 0) {
 }
 
 tpm.edit = tpm %>% dplyr::filter(substr(enst, 1, 4) == "ENST")
-tpm.edit = tpm.edit %>% dplyr::select(enst, colnames(tpm)[is.element(colnames(tpm), tcga$sample_id)])
+tpm.edit = tpm.edit %>% dplyr::select(enst, colnames(tpm)[is.element(colnames(tpm), tcga$case)])
 tpm.edit = tpm.edit %>% gather("case", "log2tpm", 2:ncol(tpm.edit))
 tpm.edit = tpm.edit %>% mutate(tpm = round((2^as.numeric(log2tpm)) - 0.001, 4))
 tpm.edit = tpm.edit %>% mutate(tpm = ifelse(is.na(tpm), 0, tpm))
@@ -120,6 +124,18 @@ aa_valid$TPM[is.na(aa_valid$TPM)] = ""
 
 # Remove duplicate aa.alts
 aa_valid.1 = aa_valid[!duplicated(aa_valid$aa.seq.alt), ]
+
+# Optional smoke-test toggle (NEW, same env var as Step 11): set
+# TEST_N_JUNCTIONS before running to limit this run to just the first N
+# AA predictions from Step 11, e.g. `export TEST_N_JUNCTIONS=5`. Unset
+# (the default) means a normal full run.
+test_n <- Sys.getenv("TEST_N_JUNCTIONS", unset = "")
+if (test_n != "") {
+  test_n <- as.integer(test_n)
+  cat("[TEST MODE] TEST_N_JUNCTIONS is set -- limiting to the first", test_n,
+      "of", nrow(aa_valid.1), "AA predictions.\n")
+  aa_valid.1 <- aa_valid.1 %>% dplyr::slice(1:min(test_n, nrow(aa_valid.1)))
+}
  
 # ###########################################################################
 # #  Step 3: Edit the AA sequences to only Include 8-11 mers ----------------
@@ -171,7 +187,12 @@ generate_nmers <- function(aa_i, aa_sequence, h) {
   flank_30n <- substring(aa_sequence, pmax(starts - 30, 1), starts - 1)
   flank_30c <- substring(aa_sequence, starts + h, pmin(starts + h + 29, seq_len))
   dt <- data.table(aa_i)[rep(1, length(nmer_h)), ]
-  dt[, `:=`(n_flank = flank_30n, n_mer = nmer_h, c_flank = flank_30c)]
+  # aa_start/aa_end (NEW): the n-mer's 1-based position within aa_sequence --
+  # this was already being computed as `starts` above, just never exported.
+  # This IS the peptide coordinate (e.g. for a SOPRANO bed file): no exon or
+  # genomic information needed, just this index pair plus enst.model.
+  dt[, `:=`(n_flank = flank_30n, n_mer = nmer_h, c_flank = flank_30c,
+            aa_start = starts, aa_end = starts + h - 1)]
   dt
 }
 
@@ -224,6 +245,65 @@ nmer_11_neo <- anti_join(nmer11_mut, nmer11_wt, by = c("n_flank", "n_mer", "c_fl
 nmer_all = rbind((rbind(rbind(nmer_08_neo, nmer_09_neo), nmer_10_neo)), nmer_11_neo)
 
 ###########################################################################
+#  Step 4b (NEW): Flag n-mers spanning an exon-exon boundary --------------
+###########################################################################
+# Uses the ALT exon -> AA coordinate map written by Step 11
+# (Exon_CDS_AA_Map_*.tsv, only rows that passed CDS-reconstruction
+# validation) to check whether each retained n-mer's [aa_start, aa_end]
+# window is drawn from a single exon or spans a junction. This is the
+# highest-risk case for a coordinate mistake, so it's flagged explicitly
+# rather than left implicit.
+
+setwd(directory_11)
+exon_map_candidates <- list.files(pattern = "^Exon_CDS_AA_Map_[0-9]{8}\\.tsv$")
+
+if (length(exon_map_candidates) > 0) {
+  exon_map_file <- sort(exon_map_candidates, decreasing = TRUE)[1]
+  exon_map_dt <- fread(exon_map_file, na.strings = c("", "NA"))
+  data.table::setnames(exon_map_dt, c("aa_start", "aa_end"), c("exon_aa_start", "exon_aa_end"))
+
+  nmer_dt <- as.data.table(nmer_all)
+  nmer_dt[, row_id := .I]
+
+  flag_result <- tryCatch({
+    data.table::setkey(exon_map_dt, enst.model, exon_aa_start, exon_aa_end)
+
+    overlaps <- data.table::foverlaps(
+      nmer_dt[, .(row_id, enst.model, aa_start, aa_end)],
+      exon_map_dt[, .(enst.model, exon_aa_start, exon_aa_end, exon_idx)],
+      by.x = c("enst.model", "aa_start", "aa_end"),
+      by.y = c("enst.model", "exon_aa_start", "exon_aa_end"),
+      type = "any",
+      nomatch = NULL
+    )
+
+    span_summary <- overlaps[, .(n_exons_spanned = data.table::uniqueN(exon_idx)), by = row_id]
+
+    merged <- merge(nmer_dt, span_summary, by = "row_id", all.x = TRUE)
+    merged[is.na(n_exons_spanned), n_exons_spanned := 0L]
+    merged[, spans_exon_boundary := n_exons_spanned > 1]
+    merged[, row_id := NULL]
+    merged
+  }, error = function(e) {
+    cat("[WARNING] Exon-boundary flagging failed:", conditionMessage(e), "\n")
+    nmer_dt[, row_id := NULL]
+    nmer_dt[, `:=`(n_exons_spanned = NA_integer_, spans_exon_boundary = NA)]
+    nmer_dt
+  })
+
+  nmer_all <- as_tibble(flag_result)
+  cat("Exon-boundary flagging: ", sum(nmer_all$spans_exon_boundary, na.rm = TRUE),
+      " of ", nrow(nmer_all), " retained n-mers span an exon-exon junction (0 unflaggable: ",
+      sum(is.na(nmer_all$spans_exon_boundary)), ")\n", sep = "")
+} else {
+  cat("[WARNING] No Exon_CDS_AA_Map file found in", directory_11,
+      "-- run the updated Step 11 first. Skipping exon-boundary flagging.\n")
+  nmer_all <- nmer_all %>% dplyr::mutate(n_exons_spanned = NA_integer_, spans_exon_boundary = NA)
+}
+
+setwd(directory_12)
+
+###########################################################################
 #  Step 5: Export Complete Files ------------------------------------------
 ###########################################################################
 setwd(directory_12)
@@ -252,11 +332,40 @@ nmer_9  <- read_tsv(filename_9mer, na = c("", "NA"))
 nmer_10 <- read_tsv(filename_10mer, na = c("", "NA"))
 nmer_11 <- read_tsv(filename_11mer, na = c("", "NA"))
 
-# Load FASTA (already in your script)
+# Load canonical + isoform FASTAs (NEW: both combined into one exclusion set)
+# UP000005640_9606.fasta          = canonical sequences (one per gene)
+# UP000005640_9606_additional.fasta = known alternative isoforms
+# Filtering against both means any peptide from ANY annotated human protein
+# sequence (canonical or isoform) is removed before MHCflurry runs --
+# no point predicting binding for something that already exists in a normal
+# human protein. Saves compute in 14a/14b and keeps the neoantigen list clean.
 fasta_dir <- Sys.getenv("PATH_TO_FASTA_UNIPROT")
 setwd(fasta_dir)
-filename_fasta <- "UP000005640_9606.fasta"
-fastaFile <- readAAStringSet(filename_fasta)
+
+filename_fasta_canonical <- "UP000005640_9606.fasta"
+filename_fasta_isoform   <- "UP000005640_9606_additional.fasta"
+
+fastaFile_canonical <- readAAStringSet(filename_fasta_canonical)
+cat("Canonical FASTA:", length(fastaFile_canonical), "sequences\n")
+
+if (file.exists(filename_fasta_isoform)) {
+  fastaFile_isoform <- readAAStringSet(filename_fasta_isoform)
+  cat("Isoform FASTA:", length(fastaFile_isoform), "sequences\n")
+  # Combine both into one list for the k-mer extraction loop below
+  fasta_list <- as.list(as.character(c(fastaFile_canonical, fastaFile_isoform)))
+  cat("Combined:", length(fasta_list), "sequences total (canonical + isoform)\n")
+} else {
+  warning("Isoform FASTA not found at: ", filename_fasta_isoform,
+          " -- filtering against canonical sequences only. Download with:\n",
+          "wget -P ", fasta_dir, " https://ftp.uniprot.org/pub/databases/uniprot/",
+          "current_release/knowledgebase/reference_proteomes/Eukaryota/",
+          "UP000005640/UP000005640_9606_additional.fasta.gz && ",
+          "gunzip ", fasta_dir, "/UP000005640_9606_additional.fasta.gz")
+  fasta_list <- as.list(as.character(fastaFile_canonical))
+}
+rm(fastaFile_canonical)
+if (exists("fastaFile_isoform")) rm(fastaFile_isoform)
+gc()
 
 # Function to extract all h-mers from a single sequence
 extract_mers <- function(seq, h) {
@@ -265,9 +374,6 @@ extract_mers <- function(seq, h) {
   starts <- 1:(len - h + 1)
   substring(seq, starts, starts + h - 1)
 }
-
-# Convert AAStringSet to a list of character strings for easier serialization
-fasta_list <- as.list(as.character(fastaFile))
 
 # Set up cluster and export
 num_cores <- as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", detectCores() - 1))
@@ -401,4 +507,73 @@ write_tsv(MSiCE_9, filename_MSiCE_9, na = "NA", col_names = T, quote_escape = "d
 write_tsv(MSiCE_10, filename_MSiCE_10, na = "NA", col_names = T, quote_escape = "double")
 write_tsv(MSiCE_11, filename_MSiCE_11, na = "NA", col_names = T, quote_escape = "double")
 
+###########################################################################
+#  Step 6b (NEW): Peptide -> coordinate map for ALT n-mers ----------------
+###########################################################################
+# The MSi/MSiC/MSiCE files above intentionally keep only what MHCflurry
+# needs (n_mer, ctex_up, ctex_dn, TPM) -- everything else gets dropped by
+# that select(). This companion file keeps the SAME peptide+flank identity
+# (so it can be joined back onto MHCflurry's own output later, since
+# MHCflurry echoes back whatever peptide/flank values it was given) PLUS
+# junc.id, enst.model, aa_start, aa_end -- needed downstream (Step 15e) to
+# build a SOPRANO-style peptide coordinate bed file.
+
+coord_map_08 <- df_valid_08 %>% dplyr::select(junc.id, enst.model, n_mer, ctex_up, ctex_dn, aa_start, aa_end)
+coord_map_09 <- df_valid_09 %>% dplyr::select(junc.id, enst.model, n_mer, ctex_up, ctex_dn, aa_start, aa_end)
+coord_map_10 <- df_valid_10 %>% dplyr::select(junc.id, enst.model, n_mer, ctex_up, ctex_dn, aa_start, aa_end)
+coord_map_11 <- df_valid_11 %>% dplyr::select(junc.id, enst.model, n_mer, ctex_up, ctex_dn, aa_start, aa_end)
+
+write_tsv(coord_map_08, "2023_0812_peptide_coordinate_map_08mers.tsv", na = "NA", col_names = T, quote_escape = "double")
+write_tsv(coord_map_09, "2023_0812_peptide_coordinate_map_09mers.tsv", na = "NA", col_names = T, quote_escape = "double")
+write_tsv(coord_map_10, "2023_0812_peptide_coordinate_map_10mers.tsv", na = "NA", col_names = T, quote_escape = "double")
+write_tsv(coord_map_11, "2023_0812_peptide_coordinate_map_11mers.tsv", na = "NA", col_names = T, quote_escape = "double")
+
+cat("Wrote peptide coordinate map files (junc.id, enst.model, aa_start, aa_end) -- used by Step 15e to build the SOPRANO bed file.\n")
+
 print("step 12 has run successfullly, please find your result files in the output directory")
+
+###########################################################################
+#  Step 7 (NEW): Export WT n-mers as a "self-peptide" reference set -------
+###########################################################################
+# Purpose: Step 6 above applies a UniProt-proteome "cancer-specific" filter
+# to the ALT-derived n-mers only -- that filter is intentionally NOT applied
+# here, because WT-derived n-mers are *expected* to occur in the normal
+# proteome; that's the whole point of using them as the self-peptide
+# reference. These WT n-mers are formatted (same MSiC layout: n_mer,
+# ctex_up, ctex_dn, TPM) so Step 14a/14b can run them through MHCflurry
+# exactly like the ALT side. The resulting WT presentation/affinity
+# predictions are then used in Step 15e to remove any ALT "neoantigen"
+# (peptide + HLA allele) that also arises from the WT/self sequence --
+# something the exact n_flank/n_mer/c_flank match in Step 4 above can miss
+# when flanking context differs slightly but the core presented peptide is
+# effectively the same self-epitope.
+
+setwd(directory_12)
+
+# Re-use the WT n-mer tables already loaded in Step 4 above (nmer08_wt ... nmer11_wt)
+wt_raw_list <- list("08" = nmer08_wt, "09" = nmer09_wt, "10" = nmer10_wt, "11" = nmer11_wt)
+
+clean_wt_nmer <- function(df) {
+  df$c_flank <- ifelse(is.na(df$c_flank), "", df$c_flank)
+  df$n_flank <- ifelse(is.na(df$n_flank), "", df$n_flank)
+  df$n_flank <- gsub("\\*", "", df$n_flank)
+  df$c_flank <- gsub("\\*", "", df$c_flank)
+  df <- df[!grepl("\\*", df$n_mer), ]
+  df
+}
+
+for (h in names(wt_raw_list)) {
+  df_wt_h <- clean_wt_nmer(wt_raw_list[[h]])
+  df_wt_h$ctex_up <- sapply(df_wt_h$n_flank, pad_to_30_front)
+  df_wt_h$ctex_dn <- sapply(df_wt_h$c_flank, pad_to_30_back)
+
+  MSiC_wt_h <- df_wt_h %>%
+    dplyr::select("n_mer", "ctex_up", "ctex_dn") %>%
+    mutate(TPM = "")
+
+  filename_wt_h <- paste0("2023_0812_hlathenalist_msic_", h, "mers_wt.tsv")
+  write_tsv(MSiC_wt_h, filename_wt_h, na = "NA", col_names = T, quote_escape = "double")
+  cat("Wrote WT reference n-mer file:", filename_wt_h, "(", nrow(MSiC_wt_h), "rows )\n")
+}
+
+print("step 12 (WT reference n-mer export) has run successfully -- see *_mers_wt.tsv files, to be consumed by Step 14a/14b (WT side) and filtered against in Step 15e")
