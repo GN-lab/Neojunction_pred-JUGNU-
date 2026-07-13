@@ -122,10 +122,11 @@ if (file.exists(CACHE_ALL_MAP)) {
   }
 
   # 2. Bed files -- written now while we have the data, before anything else.
-  #    Format: ENST_ID / AA_START / AA_END / PEPTIDE / HLA_ALLELE
-  #    Source: 14c top files (best allele per peptide) at <=500nM affinity.
-  #    ALT bed: tumor-specific peptides only (after WT filter above).
-  #    WT bed:  native self immunopeptidome from 14c WT top files.
+  #    Format: ENST_ID / AA_START / AA_END / PEPTIDE / HLA_ALLELES / N_ALLELES
+  #    Source: raw 14b predictions filtered at <=500nM -- NOT 14c top files.
+  #    14c keeps only ONE best allele per peptide. Raw 14b has ALL alleles.
+  #    A peptide like RVHYKGTGR can bind 11 alleles at <=500nM -- we want
+  #    all of them comma-separated in HLA_ALLELES, not just the best one.
   AFFINITY_THRESHOLD <- 500  # nM
 
   coord_map_files <- c(
@@ -135,23 +136,39 @@ if (file.exists(CACHE_ALL_MAP)) {
     "2023_0812_peptide_coordinate_map_11mers.tsv"
   )
 
-  make_bed <- function(pep_dt, coord_map, label) {
-    joined <- merge(pep_dt, coord_map,
+  make_bed <- function(raw_dt, coord_map, label) {
+    # raw_dt: peptide, n_flank, c_flank, allele -- all alleles at <=500nM
+    joined <- merge(raw_dt, coord_map,
                     by.x = c("peptide","n_flank","c_flank"),
                     by.y = c("n_mer","n_flank","c_flank"),
-                    all.x = TRUE, allow.cartesian = FALSE)
-    bed <- unique(joined[!is.na(enst.model), .(
-      ENST_ID    = enst.model,
-      AA_START   = aa_start,
-      AA_END     = aa_end,
-      PEPTIDE    = peptide,
-      HLA_ALLELE = allele
-    )])
+                    all.x = TRUE, allow.cartesian = TRUE)
+    # Collapse all qualifying alleles per (transcript, position, peptide)
+    bed <- joined[!is.na(enst.model), .(
+      HLA_ALLELES = paste(sort(unique(allele)), collapse = ","),
+      N_ALLELES   = uniqueN(allele)
+    ), by = .(ENST_ID  = enst.model,
+              AA_START = aa_start,
+              AA_END   = aa_end,
+              PEPTIDE  = peptide)]
     setorder(bed, ENST_ID, AA_START)
     cat(label, "bed:", nrow(bed), "rows |",
         uniqueN(bed$PEPTIDE), "unique peptides |",
-        uniqueN(bed$ENST_ID), "transcripts\n")
+        uniqueN(bed$ENST_ID), "transcripts |",
+        round(mean(bed$N_ALLELES), 2), "alleles/peptide avg\n")
     bed
+  }
+
+  load_raw_14b <- function(patterns, threshold, filter_peps = NULL) {
+    files <- tryCatch(lapply(patterns, latest_file), error = function(e) NULL)
+    if (is.null(files)) return(NULL)
+    dt <- rbindlist(lapply(files, fread, na.strings = c("","NA")),
+                    use.names = TRUE, fill = TRUE)
+    if ("mhcflurry_affinity" %in% names(dt))
+      setnames(dt, "mhcflurry_affinity", "mhcflurry_binding_affinity")
+    dt <- dt[!is.na(mhcflurry_binding_affinity) &
+               mhcflurry_binding_affinity <= threshold]
+    if (!is.null(filter_peps)) dt <- dt[peptide %in% filter_peps]
+    dt
   }
 
   if (all(file.exists(coord_map_files))) {
@@ -159,56 +176,54 @@ if (file.exists(CACHE_ALL_MAP)) {
                            use.names = TRUE, fill = TRUE)
     setnames(coord_map, c("ctex_up","ctex_dn"), c("n_flank","c_flank"))
 
-    # ALT bed
-    if ("mhcflurry_binding_affinity" %in% names(df_all_map)) {
-      alt_peps <- df_all_map[mhcflurry_binding_affinity <= AFFINITY_THRESHOLD,
-                              .(peptide, n_flank, c_flank, allele)]
-    } else {
-      alt_peps <- df_all_map[, .(peptide, n_flank, c_flank, allele)]
+    # ALT bed -- raw 14b ALT predictions, tumor-specific peptides only
+    tumor_peps <- unique(df_all_map$peptide)
+    alt_raw <- load_raw_14b(
+      c("^08mers_flank_mhcflurry_[0-9_]+\\.csv$",
+        "^09mers_flank_mhcflurry_[0-9_]+\\.csv$",
+        "^10mers_flank_mhcflurry_[0-9_]+\\.csv$",
+        "^11mers_flank_mhcflurry_[0-9_]+\\.csv$"),
+      AFFINITY_THRESHOLD, filter_peps = tumor_peps
+    )
+    if (!is.null(alt_raw)) {
+      alt_bed <- make_bed(alt_raw[, .(peptide, n_flank, c_flank, allele)],
+                          coord_map, "ALT filtered")
+      fwrite(alt_bed, paste0("immunopeptidome_alt_filtered_", current_date, ".bed"),
+             sep = "\t", col.names = TRUE, quote = FALSE)
+      cat("Wrote immunopeptidome_alt_filtered_", current_date, ".bed\n", sep = "")
+      rm(alt_raw, alt_bed)
     }
-    alt_bed <- make_bed(alt_peps, coord_map, "ALT filtered")
-    fwrite(alt_bed, paste0("immunopeptidome_alt_filtered_", current_date, ".bed"),
-           sep = "\t", col.names = TRUE, quote = FALSE)
-    cat("Wrote immunopeptidome_alt_filtered_", current_date, ".bed\n", sep = "")
-    rm(alt_peps, alt_bed)
+    rm(tumor_peps)
 
-    # WT bed from 14c WT top files
-    wt_top_pats <- c("^mhcflurry_08mer_wt_top_[0-9]{8}\\.tsv$",
-                     "^mhcflurry_09mer_wt_top_[0-9]{8}\\.tsv$",
-                     "^mhcflurry_10mer_wt_top_[0-9]{8}\\.tsv$",
-                     "^mhcflurry_11mer_wt_top_[0-9]{8}\\.tsv$")
-    wt_top_files <- tryCatch(lapply(wt_top_pats, latest_file), error = function(e) NULL)
-    if (!is.null(wt_top_files)) {
-      wt_top <- rbindlist(lapply(wt_top_files, fread, na.strings = c("", "NA")),
-                          use.names = TRUE, fill = TRUE)
-      if ("mhcflurry_affinity" %in% names(wt_top))
-        setnames(wt_top, "mhcflurry_affinity", "mhcflurry_binding_affinity")
-      wt_top <- wt_top[!is.na(mhcflurry_binding_affinity) &
-                         mhcflurry_binding_affinity <= AFFINITY_THRESHOLD]
-      wt_nmer_files <- c(
-        "2023_0802_all_iterations_wt_list_08mers.tsv",
-        "2023_0802_all_iterations_wt_list_09mers.tsv",
-        "2023_0802_all_iterations_wt_list_10mers.tsv",
-        "2023_0802_all_iterations_wt_list_11mers.tsv"
-      )
-      if (all(file.exists(wt_nmer_files))) {
-        wt_nmer_dt <- rbindlist(lapply(wt_nmer_files, fread, na.strings = c("", "NA")),
-                                use.names = TRUE, fill = TRUE)
-        wt_coord <- wt_nmer_dt[, .(n_mer, n_flank, c_flank, enst.model, aa_start, aa_end)]
-        wt_coord[, n_flank := stringr::str_pad(ifelse(is.na(n_flank),"",n_flank),30,"left", "-")]
-        wt_coord[, c_flank := stringr::str_pad(ifelse(is.na(c_flank),"",c_flank),30,"right","-")]
-        rm(wt_nmer_dt); gc()
-        wt_peps <- wt_top[, .(peptide, n_flank, c_flank, allele)]
-        wt_bed  <- make_bed(wt_peps, wt_coord, "WT native")
-        fwrite(wt_bed, paste0("immunopeptidome_wt_native_", current_date, ".bed"),
-               sep = "\t", col.names = TRUE, quote = FALSE)
-        cat("Wrote immunopeptidome_wt_native_", current_date, ".bed\n", sep = "")
-        rm(wt_top, wt_coord, wt_peps, wt_bed); gc()
-      } else {
-        cat("[WARNING] WT n-mer files not found -- skipping WT native bed\n")
-      }
+    # WT bed -- raw 14b WT predictions, all alleles <=500nM
+    wt_nmer_files <- c(
+      "2023_0802_all_iterations_wt_list_08mers.tsv",
+      "2023_0802_all_iterations_wt_list_09mers.tsv",
+      "2023_0802_all_iterations_wt_list_10mers.tsv",
+      "2023_0802_all_iterations_wt_list_11mers.tsv"
+    )
+    wt_raw <- load_raw_14b(
+      c("^08mers_flank_mhcflurry_wt_[0-9_]+\\.csv$",
+        "^09mers_flank_mhcflurry_wt_[0-9_]+\\.csv$",
+        "^10mers_flank_mhcflurry_wt_[0-9_]+\\.csv$",
+        "^11mers_flank_mhcflurry_wt_[0-9_]+\\.csv$"),
+      AFFINITY_THRESHOLD, filter_peps = NULL
+    )
+    if (!is.null(wt_raw) && all(file.exists(wt_nmer_files))) {
+      wt_nmer_dt <- rbindlist(lapply(wt_nmer_files, fread, na.strings = c("","NA")),
+                              use.names = TRUE, fill = TRUE)
+      wt_coord <- wt_nmer_dt[, .(n_mer, n_flank, c_flank, enst.model, aa_start, aa_end)]
+      wt_coord[, n_flank := stringr::str_pad(ifelse(is.na(n_flank),"",n_flank),30,"left", "-")]
+      wt_coord[, c_flank := stringr::str_pad(ifelse(is.na(c_flank),"",c_flank),30,"right","-")]
+      rm(wt_nmer_dt); gc()
+      wt_bed <- make_bed(wt_raw[, .(peptide, n_flank, c_flank, allele)],
+                         wt_coord, "WT native")
+      fwrite(wt_bed, paste0("immunopeptidome_wt_native_", current_date, ".bed"),
+             sep = "\t", col.names = TRUE, quote = FALSE)
+      cat("Wrote immunopeptidome_wt_native_", current_date, ".bed\n", sep = "")
+      rm(wt_raw, wt_coord, wt_bed); gc()
     } else {
-      cat("[WARNING] 14c WT top files not found -- skipping WT native bed\n")
+      cat("[WARNING] WT raw 14b or n-mer files not found -- skipping WT native bed\n")
     }
     rm(coord_map); gc()
   } else {
