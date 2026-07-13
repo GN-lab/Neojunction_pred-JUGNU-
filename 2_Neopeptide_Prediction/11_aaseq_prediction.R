@@ -13,9 +13,18 @@
 #  Step 0: Load Packages and Data -----------------------------------------
 ###########################################################################
 
-start.time <- proc.time()  # Start timing
-
 rm(list = ls(all.names = TRUE))
+
+start.time <- proc.time()  # Start timing -- moved after rm() so it actually survives (previously wiped immediately, which is why the later "Does start.time exist?" fallback check was needed at all)
+
+# Accumulator for the exon -> CDS/AA coordinate map (NEW). One row per
+# (junc.id, enst.model, exon_idx) for the ALT exon set, giving each exon's
+# contribution in CDS-relative nt and AA-relative coordinates. This is what
+# Step 12 joins against to attach peptide coordinates and flag n-mers that
+# span an exon-exon boundary. Placed AFTER rm() above -- putting it before,
+# like start.time originally was, meant it got wiped immediately and stayed
+# undefined for the entire run.
+EXON_COORD_MAP <- tibble::tibble()
 
 # Suppress package startup messages and load explicitly
 suppressPackageStartupMessages({
@@ -32,8 +41,8 @@ suppressPackageStartupMessages({
   library(Biostrings)  # For DNAString and translate
 })
 
-# Reference genome
-dna <- BSgenome.Hsapiens.UCSC.hg38
+# Reference genomes - use both BSgenome and FASTA file
+dna_bs <- BSgenome.Hsapiens.UCSC.hg38  # For main chromosomes
 
 # Establish Directories ---------------------------------------------------
 
@@ -49,6 +58,74 @@ if (directory_03 == "") directory_03 <- "results/"
 if (directory_04 == "") directory_04 <- "results/"
 if (directory_10 == "") directory_10 <- "results/"
 if (directory_11 == "") directory_11 <- "results/"
+
+# Also load the FASTA file for alt contigs -- LAZY AND OPTIONAL (was a hard
+# stop() before, even though this is only a fallback for sequences on
+# non-primary-chromosome contigs). Protein-coding neojunctions almost never
+# land on alt/patch scaffolds, so most runs never need this file at all. We
+# only attempt to open it the first time get_sequence_smart() genuinely
+# needs an alt-contig lookup, and if it's missing at that point we return NA
+# (with a warning) instead of halting a multi-hour run over a file that may
+# never actually be used.
+fasta_file <- file.path(directory_00, "Homo_sapiens.GRCh38.dna.toplevel.fa")
+dna_fa <- NULL
+fasta_file_checked <- FALSE
+
+get_alt_contig_fasta <- function() {
+  if (is.null(dna_fa) && !fasta_file_checked) {
+    fasta_file_checked <<- TRUE
+    if (file.exists(fasta_file)) {
+      dna_fa <<- FaFile(fasta_file)
+      cat("[INFO] Alt-contig FASTA loaded:", fasta_file, "\n")
+    } else {
+      cat("[WARNING] Alt-contig FASTA not found at:", fasta_file,
+          "-- any sequence on a non-primary-chromosome contig will return NA. ",
+          "If this warning never appears again with an actual coordinate attached, ",
+          "you never needed this file.\n")
+    }
+  }
+  dna_fa
+}
+
+# Helper function to get sequence from appropriate source
+get_sequence_smart <- function(seqname, start, end, strand) {
+  if (length(seqname) == 0 || all(is.na(seqname))) {
+    return(NA_character_)
+  }
+  seqname <- seqname[1]  # scalar per row
+  start <- start[1]
+  end <- end[1] 
+  strand <- strand[1]
+
+  main_chromosomes <- c(paste0("chr", 1:22), "chrX", "chrY", "chrM", "chrMT")
+  
+  if (seqname %in% main_chromosomes) {
+    res <- tryCatch({
+      gr <- GRanges(seqnames = seqname, ranges = IRanges(start, end), strand = strand)
+      as.vector(getSeq(dna_bs, gr))
+    }, error = function(e) NA_character_)
+    if (!is.na(res[1])) return(res)
+  }
+  
+  # Alt contigs → FASTA (strips 'chr' prefix)
+  seqname_clean <- gsub("^chr", "", seqname)
+  fa <- get_alt_contig_fasta()
+  if (is.null(fa)) {
+    cat("[WARNING] Needed alt-contig sequence at", seqname, ":", start, "-", end,
+        "but no FASTA is available -- returning NA for this exon.\n")
+    return(NA_character_)
+  }
+  tryCatch({
+    gr <- GRanges(seqnames = seqname_clean, ranges = IRanges(start, end), strand = strand)
+    open(fa)
+    seq_val <- as.vector(getSeq(fa, gr))
+    close(fa)
+    seq_val
+  }, error = function(e) {
+    close(fa)
+    NA_character_
+  })
+}
 
 #  Load files: Auto-detect and Load Latest Input Files -----------------------
 
@@ -139,6 +216,20 @@ neo_ids.2 <- neo_ids %>%
   dplyr::mutate(strand = sapply(strsplit(junc.id, ":"), "[[", 2)) %>% 
   dplyr::mutate(int.start = as.numeric(gsub("-.*", "", sapply(strsplit(junc.id, ":"), "[[", 3))) + 1) %>% 
   dplyr::mutate(int.end = as.numeric(gsub(".*-", "", sapply(strsplit(junc.id, ":"), "[[", 3))))
+
+# Optional smoke-test toggle (NEW): set TEST_N_JUNCTIONS before running to
+# limit this run to just the first N junctions, e.g. `export
+# TEST_N_JUNCTIONS=5`. Unset (the default) means a normal full run --
+# this has zero effect otherwise. Everything downstream derives from
+# neo_ids.2, so subsetting it here cascades correctly through the rest of
+# the script without touching any loop logic.
+test_n <- Sys.getenv("TEST_N_JUNCTIONS", unset = "")
+if (test_n != "") {
+  test_n <- as.integer(test_n)
+  cat("[TEST MODE] TEST_N_JUNCTIONS is set -- limiting to the first", test_n,
+      "of", nrow(neo_ids.2), "junctions.\n")
+  neo_ids.2 <- neo_ids.2 %>% dplyr::slice(1:min(test_n, nrow(neo_ids.2)))
+}
 
 # Edit the column names of the complete junction list (obtained from Step 00)
 dataframe_sj.orig <- dataframe_sj.orig %>% 
@@ -253,9 +344,23 @@ for(i in 1:nrow(neo_ids_final)) {
       dplyr::arrange(tx_id, exon_idx) %>% 
       dplyr::select(-exon_id, -gene_id, -tx_biotype)
     
+    # Get sequences using our smart function
     exons <- exons %>% 
-      dplyr::mutate(seq = as.vector(getSeq(dna, GRanges(exons))))
+      dplyr::filter(!is.na(seqnames), !is.na(start), !is.na(end), !is.na(strand)) %>%
+      dplyr::rowwise() %>%
+      dplyr::mutate(seq = get_sequence_smart(seqnames, start, end, strand)) %>%
+      dplyr::ungroup()
+    
+    # Remove any exons where we couldn't get sequence
+    exons <- exons %>% 
+      dplyr::filter(!is.na(seq))
   })
+  
+  # Skip if no exons left
+  if (nrow(exons) == 0) {
+    cat("Skipping gene", ENSG, "- could not get sequences for any exons\n")
+    next
+  }
   
   # check if 1 or 2 of the edge(s) of the junction will match the canonical junc --------
   
@@ -308,8 +413,7 @@ for(i in 1:nrow(neo_ids_final)) {
   ENSTs.test <- ENSTs.test[!ENSTs.test %in% ENSTs.exclude]
   
   # loop for each tx --------------------------------------------------------
-
-
+  
   if (length(ENSTs.test) == 0) {
     next
   } else {
@@ -351,7 +455,8 @@ for(i in 1:nrow(neo_ids_final)) {
       }
       
       # AS type -----------------------------------------------------------------
-      
+      TYPE <- "UNDEFINED"
+      NOTE <- "UNDEFINED"
       # discriminate 9 different patterns
       
       # 1) ES; exon-skipping
@@ -431,6 +536,9 @@ for(i in 1:nrow(neo_ids_final)) {
         if (!is.null(NEW.EXON$start) && !is.null(NEW.EXON$end) && NEW.EXON$start > NEW.EXON$end) {
           NEW.EXON <- NULL
         } else {
+          # Use our smart function to get sequence
+          seq_val <- get_sequence_smart(paste0("chr", CHR), NEW.EXON$start, NEW.EXON$end, STRAND)
+          
           NEW.EXON <- GRanges(
             seqnames = paste0("chr", CHR),
             strand = STRAND, 
@@ -440,7 +548,7 @@ for(i in 1:nrow(neo_ids_final)) {
             dplyr::mutate(tx_id = ENST.j) %>% 
             dplyr::mutate(exon_idx = NEW.EXON$idx) %>% 
             dplyr::mutate(seqnames = as.character(seqnames)) %>% 
-            dplyr::mutate(seq = as.vector(getSeq(dna, GRanges(seqnames = paste0("chr", CHR), strand = STRAND, ranges = IRanges(NEW.EXON$start, NEW.EXON$end)))))
+            dplyr::mutate(seq = seq_val)
         }
         if (k == 1) {
           LT.NEW.EXON <- NEW.EXON
@@ -500,6 +608,90 @@ for(i in 1:nrow(neo_ids_final)) {
       } else {
         ""
       }
+      
+      # exon -> CDS/AA coordinate map + validation (NEW) -------------------------
+      # For each exon (in the SAME order used to build tx.seq via paste(collapse)),
+      # compute how much of that exon's own sequence falls inside the CDS (i.e.
+      # outside the 5'/3' UTR), in both CDS-relative nt coordinates and AA
+      # coordinates. Then reconstruct the CDS purely from this per-exon map and
+      # check it's byte-identical to cds.seq.wt/alt built above by simple
+      # substr(). A mismatch means the coordinate math is wrong -- almost always
+      # right at an exon boundary -- and is flagged rather than trusted silently.
+      
+      add_cds_coords <- function(exon_df, ln.utr5, ln.utr3, tx_total_len) {
+        widths <- nchar(exon_df$seq)
+        widths[is.na(widths)] <- 0
+        tx_end   <- cumsum(widths)
+        tx_start <- tx_end - widths + 1
+        exon_df$tx_start <- tx_start
+        exon_df$tx_end   <- tx_end
+        
+        cds_lo <- ln.utr5 + 1
+        cds_hi <- tx_total_len - ln.utr3
+        
+        ov_start <- pmax(tx_start, cds_lo)
+        ov_end   <- pmin(tx_end,   cds_hi)
+        has_cds  <- ov_start <= ov_end
+        
+        exon_df$cds_start <- ifelse(has_cds, ov_start - ln.utr5, NA_real_)
+        exon_df$cds_end   <- ifelse(has_cds, ov_end   - ln.utr5, NA_real_)
+        
+        local_start <- ifelse(has_cds, ov_start - tx_start + 1, NA_real_)
+        local_end   <- ifelse(has_cds, ov_end   - tx_start + 1, NA_real_)
+        exon_df$cds_seq <- ifelse(has_cds, substr(exon_df$seq, local_start, local_end), NA_character_)
+        
+        # AA coordinates: 1-based, inclusive. A codon split across two exons
+        # gets ceiling()'d on both ends, so it's correctly attributed to BOTH
+        # exons -- this is deliberate, not a bug: that codon really did come
+        # from both.
+        exon_df$aa_start <- ifelse(has_cds, ceiling(exon_df$cds_start / 3), NA_real_)
+        exon_df$aa_end   <- ifelse(has_cds, ceiling(exon_df$cds_end   / 3), NA_real_)
+        
+        exon_df
+      }
+      
+      COORD_CHECK <- tryCatch({
+        exons.j.map <- add_cds_coords(exons.j, ln.utr5, ln.utr3, nchar(tx.seq.wt))
+        exons.new.map <- if (nrow(exons.new) > 0) {
+          add_cds_coords(exons.new, ln.utr5, ln.utr3, nchar(tx.seq.alt))
+        } else {
+          exons.new[0, ]
+        }
+        
+        reconstructed_cds_wt <- paste(exons.j.map$cds_seq[!is.na(exons.j.map$cds_seq)], collapse = "")
+        reconstructed_cds_alt <- if (nrow(exons.new.map) > 0) {
+          paste(exons.new.map$cds_seq[!is.na(exons.new.map$cds_seq)], collapse = "")
+        } else {
+          ""
+        }
+        
+        check_wt  <- identical(reconstructed_cds_wt,  cds.seq.wt)
+        check_alt <- identical(reconstructed_cds_alt, cds.seq.alt)
+        
+        if (!check_wt || !check_alt) {
+          cat("[COORD MAP MISMATCH] junc.id =", JUNC.ID, "enst.model =", ENST.j,
+              "| wt_ok =", check_wt, "| alt_ok =", check_alt, "\n")
+        }
+        
+        # Persist the ALT exon->coordinate map -- only rows that actually
+        # contribute to the CDS, only if the reconstruction check passed for
+        # ALT (a failed map is worse than no map -- don't propagate bad
+        # coordinates downstream to Step 12).
+        if (check_alt && nrow(exons.new.map) > 0) {
+          exon_rows <- exons.new.map %>%
+            dplyr::filter(!is.na(cds_start)) %>%
+            dplyr::mutate(junc.id = JUNC.ID, enst.model = ENST.j) %>%
+            dplyr::select(junc.id, enst.model, exon_idx, seqnames, start, end, strand,
+                          cds_start, cds_end, aa_start, aa_end)
+          EXON_COORD_MAP <<- dplyr::bind_rows(EXON_COORD_MAP, exon_rows)
+        }
+        
+        if (check_wt && check_alt) "pass" else "MISMATCH"
+      }, error = function(e) {
+        cat("[COORD MAP ERROR] junc.id =", JUNC.ID, "enst.model =", ENST.j,
+            "|", conditionMessage(e), "\n")
+        "ERROR"
+      })
       
       # translate ------------------------------------------------------------------
       
@@ -575,7 +767,8 @@ for(i in 1:nrow(neo_ids_final)) {
                                sc = SC, 
                                type = TYPE, 
                                note = NOTE, 
-                               check = CHECK
+                               check = CHECK,
+                               coord_check = COORD_CHECK
                              ))
     }
   }
@@ -607,6 +800,21 @@ neo_ids.5 <- neo_ids_final %>%
 setwd(directory_11)
 filename_out <- paste0("Res_AA_Prediction_Confirmed_", current_date, ".tsv")
 write_tsv(neo_ids.5, filename_out, na = "NA", col_names = TRUE)
+
+# Write the exon -> CDS/AA coordinate map (NEW). Step 12 reads this to attach
+# peptide coordinates and flag n-mers that span an exon-exon boundary.
+filename_coord_map <- paste0("Exon_CDS_AA_Map_", current_date, ".tsv")
+write_tsv(EXON_COORD_MAP, filename_coord_map, na = "NA", col_names = TRUE)
+
+n_mismatch <- sum(neo_ids.5$coord_check == "MISMATCH", na.rm = TRUE)
+n_error    <- sum(neo_ids.5$coord_check == "ERROR", na.rm = TRUE)
+cat("\nCoordinate map validation: ", sum(neo_ids.5$coord_check == "pass", na.rm = TRUE),
+    " pass, ", n_mismatch, " MISMATCH, ", n_error, " ERROR (out of ", nrow(neo_ids.5), ")\n", sep = "")
+if (n_mismatch > 0) {
+  cat("[WARNING] ", n_mismatch, " junction(s) failed CDS reconstruction from the exon map -- ",
+      "their rows are excluded from ", filename_coord_map, " and should not be trusted for peptide coordinates. ",
+      "Filter neo_ids.5 (or the output tsv) on coord_check == 'MISMATCH' to inspect which junc.id/enst.model these are.\n", sep = "")
+}
 
 cat("Script completed successfully!\n")
 cat("Output file:", filename_out, "\n")
