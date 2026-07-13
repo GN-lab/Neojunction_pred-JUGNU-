@@ -1,10 +1,12 @@
 #!/usr/bin/env Rscript
-# Step 14: Generate input CSV file for running MHCFlurry 2.0
-# September 27, 2025 | Gaurav Raichand | The Institute of Cancer Research
+# Step 14a: Generate input CSV file for running MHCFlurry 2.0
+# Modified to read HLA alleles directly from OptiType results per sample
+# November 24, 2025 | Gaurav Raichand | The Institute of Cancer Research
 #     The input CSV file is expected to contain columns 
-#     “allele”, “peptide”, and, optionally, “n_flank”, and “c_flank”.
-
+#     "allele", "peptide", and, optionally, "n_flank", and "c_flank".
+#
 # To run on command line: $ mhcflurry-predict INPUT.csv –out RESULT.csv
+# Prerequisite: Source config.sh to set INPUT_DIR and OPTITYPE_OUTPUT_DIR
 
 ###########################################################################
 #  Step 0: Load Packages and Data -----------------------------------------
@@ -16,83 +18,338 @@ library(readxl)
 library(tidyverse)
 library(data.table)  # For faster reading and operations
 
-# Load Directories -------------------------------------------------------
-directory_12 <- Sys.getenv("STEP12_OUTPUT_DIR")
-directory_14 <- Sys.getenv("STEP14_OUTPUT_DIR")
+# Load Directories from Env (sourced from config.sh)
+input_dir    <- Sys.getenv("INPUT_DIR")          # /data/rds/DMP/UCEC/EVOLIMMU/graichand/Neojuction_pred/SSNIP/0_Input_Files
+directory_12 <- Sys.getenv("STEP12_OUTPUT_DIR")  # == OUTPUT_DIR from config
+directory_14 <- Sys.getenv("STEP14_OUTPUT_DIR")  # == OUTPUT_DIR from config
 
-# Hardcode the exact input filenames from Step 12 (based on your ls output)
+# Path to OptiType results (configure in config.sh or use default)
+optitype_dir <- Sys.getenv("OPTITYPE_OUTPUT_DIR")
+
+# Input filenames (n-mers from Step 12 outputs in directory_12)
 nmers_08_file <- "2023_0812_hlathenalist_msic_08mers.tsv"
 nmers_09_file <- "2023_0812_hlathenalist_msic_09mers.tsv"
 nmers_10_file <- "2023_0812_hlathenalist_msic_10mers.tsv"
 nmers_11_file <- "2023_0812_hlathenalist_msic_11mers.tsv"
 
-# Hardcode the date for output filenames (matching inputs)
-run_date <- "2023_0812"
+# Samples file in INPUT_DIR
+samples_file <- file.path(input_dir, "samples.txt")  # Adjust if samples.txt is elsewhere
 
-# Load Files -------------------------------------------------------------
+# Hardcode run date for outputs
+run_date <- "2026_1124"
+
+# Load Samples List
+user_samples <- fread(
+  samples_file,
+  header   = FALSE,
+  col.names = "sample_id",
+  fill     = TRUE,
+  na.strings = c("", "NA")
+)$sample
+
+user_samples <- unique(user_samples[!is.na(user_samples)])
+cat("Loaded", length(user_samples), "user samples from", samples_file, "\n")
+
+###########################################################################
+# Extract HLA Alleles from OptiType Results -------------------------
+###########################################################################
+
+extract_hla_from_optitype <- function(optitype_dir, user_samples) {
+  # Extract HLA alleles from OptiType *_result.tsv files per sample
+  # Returns a data.table with columns: sample, alleles_str (pipe-separated, HLA format)
+  # OptiType output has columns: A1, A2, B1, B2, C1, C2, Reads, Objective
+  
+  hla_results_list <- list()
+  
+  for (sample in user_samples) {
+    result_file <- file.path(optitype_dir, sample, paste0(sample, "_result.tsv"))
+    
+    if (!file.exists(result_file)) {
+      cat("  WARNING: OptiType result file not found for", sample, "\n")
+      next
+    }
+    
+    # Read OptiType result
+    optitype_result <- tryCatch(
+      fread(result_file, header = TRUE, na.strings = c("", "NA")),
+      error = function(e) {
+        cat("  ERROR reading", result_file, ":", e$message, "\n")
+        return(NULL)
+      }
+    )
+    
+    if (is.null(optitype_result) || nrow(optitype_result) == 0) {
+      cat("  WARNING: No data in OptiType result for", sample, "\n")
+      next
+    }
+    
+    alleles <- c()
+    col_names <- tolower(colnames(optitype_result))
+    
+    # helper to normalize OptiType allele (e.g. "A*24:02") to "HLA-A*24:02"
+    norm_allele <- function(raw, locus) {
+      if (is.na(raw) || raw == "") return(NA_character_)
+      raw <- trimws(raw)
+      # remove leading "A*", "B*", "C*" from OptiType output
+      core <- sub("^[ABC]\\*", "", raw)
+      paste0("HLA-", locus, "*", core)
+    }
+    
+    # Extract A alleles (A1, A2)
+    if ("a1" %in% col_names && "a2" %in% col_names) {
+      a1_raw <- as.character(optitype_result[[which(col_names == "a1")[1]]][1])
+      a2_raw <- as.character(optitype_result[[which(col_names == "a2")[1]]][1])
+      a1 <- norm_allele(a1_raw, "A")
+      a2 <- norm_allele(a2_raw, "A")
+      if (!is.na(a1) && a1 != "") alleles <- c(alleles, a1)
+      if (!is.na(a2) && a2 != "") alleles <- c(alleles, a2)
+    }
+    
+    # Extract B alleles (B1, B2)
+    if ("b1" %in% col_names && "b2" %in% col_names) {
+      b1_raw <- as.character(optitype_result[[which(col_names == "b1")[1]]][1])
+      b2_raw <- as.character(optitype_result[[which(col_names == "b2")[1]]][1])
+      b1 <- norm_allele(b1_raw, "B")
+      b2 <- norm_allele(b2_raw, "B")
+      if (!is.na(b1) && b1 != "") alleles <- c(alleles, b1)
+      if (!is.na(b2) && b2 != "") alleles <- c(alleles, b2)
+    }
+    
+    # Extract C alleles (C1, C2)
+    if ("c1" %in% col_names && "c2" %in% col_names) {
+      c1_raw <- as.character(optitype_result[[which(col_names == "c1")[1]]][1])
+      c2_raw <- as.character(optitype_result[[which(col_names == "c2")[1]]][1])
+      c1 <- norm_allele(c1_raw, "C")
+      c2 <- norm_allele(c2_raw, "C")
+      if (!is.na(c1) && c1 != "") alleles <- c(alleles, c1)
+      if (!is.na(c2) && c2 != "") alleles <- c(alleles, c2)
+    }
+    
+    if (length(alleles) > 0) {
+      alleles_unique <- unique(alleles)
+      alleles_str <- paste(alleles_unique, collapse = "|")
+      hla_results_list[[sample]] <- data.table(
+        alleles_str = alleles_str,
+        sample      = sample
+      )
+      cat("  Extracted", length(alleles_unique), "unique alleles for", sample, "\n")
+    } else {
+      cat("  WARNING: No valid alleles extracted for", sample, "\n")
+    }
+  }
+  
+  if (length(hla_results_list) == 0) {
+    stop("No HLA alleles successfully extracted from OptiType results.")
+  }
+  
+  hla_data_combined <- rbindlist(hla_results_list)
+  return(hla_data_combined)
+}
+
+# Extract HLA alleles from OptiType per sample
+cat("\nExtracting HLA alleles from OptiType results directory:\n", optitype_dir, "\n\n")
+hla_data_filtered <- extract_hla_from_optitype(optitype_dir, user_samples)
+cat("\nSuccessfully extracted HLA data for", nrow(hla_data_filtered), "samples.\n\n")
+
+###########################################################################
+#  ORIGINAL: Parse Alleles ------------------------------------------------
+###########################################################################
+
+# Parse alleles: Split by "|", extract unique class I (HLA-A/B/C)
+hla_alleles_list <- strsplit(hla_data_filtered$alleles_str, "\\|")
+valid_lists      <- hla_alleles_list[lengths(hla_alleles_list) > 0]
+all_alleles      <- unique(unlist(valid_lists))
+class_i_alleles  <- all_alleles[grepl("^HLA-[ABC]", all_alleles)]
+
+alleles_tib <- tibble(allele = class_i_alleles)
+cat("Extracted", nrow(alleles_tib), "unique class I HLA alleles from OptiType results.\n")
+cat("Alleles:", paste(class_i_alleles, collapse = ", "), "\n\n")
+
+# Load Nmer Files (from Step 12 in directory_12)
 setwd(directory_12)
-nmers_08 <- fread(nmers_08_file, na = c("", "NA"))
-nmers_09 <- fread(nmers_09_file, na = c("", "NA"))
-nmers_10 <- fread(nmers_10_file, na = c("", "NA"))
-nmers_11 <- fread(nmers_11_file, na = c("", "NA"))
+nmers_08 <- fread(nmers_08_file, na.strings = c("", "NA"))
+nmers_09 <- fread(nmers_09_file, na.strings = c("", "NA"))
+nmers_10 <- fread(nmers_10_file, na.strings = c("", "NA"))
+nmers_11 <- fread(nmers_11_file, na.strings = c("", "NA"))
 
 ###########################################################################
-#  Step 1: Edit dataframes ------------------------------------------------
+#  Step 1: Edit Dataframes ------------------------------------------------
 ###########################################################################
-# Remove the TPM columns (if present)
+
+# Remove TPM if present
 if ("TPM" %in% colnames(nmers_08)) nmers_08[, TPM := NULL]
 if ("TPM" %in% colnames(nmers_09)) nmers_09[, TPM := NULL]
 if ("TPM" %in% colnames(nmers_10)) nmers_10[, TPM := NULL]
 if ("TPM" %in% colnames(nmers_11)) nmers_11[, TPM := NULL]
 
-# Change the column names to the suitable ones needed to run MHCFLurry 2.0
+# Rename columns for MHCflurry (n_mer -> peptide, ctex_up -> n_flank, ctex_dn -> c_flank)
 setnames(nmers_08, old = colnames(nmers_08), new = c("peptide", "n_flank", "c_flank"))
 setnames(nmers_09, old = colnames(nmers_09), new = c("peptide", "n_flank", "c_flank"))
 setnames(nmers_10, old = colnames(nmers_10), new = c("peptide", "n_flank", "c_flank"))
 setnames(nmers_11, old = colnames(nmers_11), new = c("peptide", "n_flank", "c_flank"))
 
-# Remove all "-" from columns
-nmers_08[, n_flank := gsub("-", "", as.character(n_flank))]
-nmers_08[, c_flank := gsub("-", "", as.character(c_flank))]
-nmers_09[, n_flank := gsub("-", "", as.character(n_flank))]
-nmers_09[, c_flank := gsub("-", "", as.character(c_flank))]
-nmers_10[, n_flank := gsub("-", "", as.character(n_flank))]
-nmers_10[, c_flank := gsub("-", "", as.character(c_flank))]
-nmers_11[, n_flank := gsub("-", "", as.character(n_flank))]
-nmers_11[, c_flank := gsub("-", "", as.character(c_flank))]
+# Clean flanks: Remove "-" and ensure character
+nmers_08[, `:=`(
+  n_flank = gsub("-", "", as.character(n_flank)),
+  c_flank = gsub("-", "", as.character(c_flank))
+)]
+nmers_09[, `:=`(
+  n_flank = gsub("-", "", as.character(n_flank)),
+  c_flank = gsub("-", "", as.character(c_flank))
+)]
+nmers_10[, `:=`(
+  n_flank = gsub("-", "", as.character(n_flank)),
+  c_flank = gsub("-", "", as.character(c_flank))
+)]
+nmers_11[, `:=`(
+  n_flank = gsub("-", "", as.character(n_flank)),
+  c_flank = gsub("-", "", as.character(c_flank))
+)]
 
-# Define alleles as tibble
-allele_a0101 <- tibble(allele = "HLA-A0101")
-allele_a0201 <- tibble(allele = "HLA-A0201")
-allele_a0301 <- tibble(allele = "HLA-A0301")
-allele_a1101 <- tibble(allele = "HLA-A1101")
-allele_a2402 <- tibble(allele = "HLA-A2402")
+# Replicate peptides for unique alleles (efficient data.table way)
+alleles_dt <- as.data.table(alleles_tib)
 
-# For each nmer dataframe, replicate for each allele and combine
+nmer_dfs     <- list(nmers_08, nmers_09, nmers_10, nmers_11)
+nmer_lengths <- c(8, 9, 10, 11)
+
 for (i in 1:4) {
-  if (i == 1) {nmer_i <- nmers_08}
-  if (i == 2) {nmer_i <- nmers_09}
-  if (i == 3) {nmer_i <- nmers_10}
-  if (i == 4) {nmer_i <- nmers_11}
-  
-  nmer_i_a0101 <- cbind(allele_a0101, nmer_i)
-  nmer_i_a0201 <- cbind(allele_a0201, nmer_i)
-  nmer_i_a0301 <- cbind(allele_a0301, nmer_i)
-  nmer_i_a1101 <- cbind(allele_a1101, nmer_i)
-  nmer_i_a2402 <- cbind(allele_a2402, nmer_i)
-  
-  n_mer_i_all <- rbind(nmer_i_a0101, nmer_i_a0201, nmer_i_a0301, nmer_i_a1101, nmer_i_a2402)
-  
-  if (i == 1) {nmers_08_final <- n_mer_i_all}
-  if (i == 2) {nmers_09_final <- n_mer_i_all}
-  if (i == 3) {nmers_10_final <- n_mer_i_all}
-  if (i == 4) {nmers_11_final <- n_mer_i_all}
+  nmer_i <- nmer_dfs[[i]]
+  if (nrow(nmer_i) == 0 || nrow(alleles_dt) == 0) {
+    cat("Skipping", nmer_lengths[i], "mers: empty data.\n")
+    next
+  }
+
+  nmer_expanded    <- nmer_i[rep(1:.N, times = nrow(alleles_dt))]
+  alleles_repeated <- alleles_dt[rep(1:.N, each = nrow(nmer_i))]
+  nmer_all         <- cbind(alleles_repeated, nmer_expanded)
+
+  if ("peptide.1" %in% names(nmer_all)) {
+    setnames(nmer_all, "peptide.1", "peptide")
+  }
+
+  # Filter out peptides with non-standard amino acids (NEW) -- MHCflurry's
+  # models were only trained on the 20 standard amino acids and will crash
+  # the ENTIRE run (no partial output saved) if even one peptide contains
+  # a non-standard letter. The most common real case is "U" (selenocysteine,
+  # a genuine 21st amino acid used by a small class of real human genes) --
+  # not a bug in the sequence, just something MHCflurry structurally can't
+  # score. Others (X, B, Z, J) mean an ambiguous/unresolved residue.
+  n_before <- nrow(nmer_all)
+  nmer_all <- nmer_all[!grepl("[^ACDEFGHIKLMNPQRSTVWY]", peptide)]
+  n_removed <- n_before - nrow(nmer_all)
+  if (n_removed > 0) {
+    cat("  Removed", n_removed, "peptide(s) with non-standard amino acids (e.g. selenocysteine) -- MHCflurry cannot score these.\n")
+  }
+
+  assign(paste0(nmer_lengths[i], "mer_final"), nmer_all)
+  cat("Processed", nmer_lengths[i], "mers:", nrow(nmer_all), "rows (peptides × alleles).\n")
+}
+
+# Write to STEP14_OUTPUT_DIR
+setwd(directory_14)
+suffix <- paste0(run_date, ".csv")  # Distinguish from original
+
+fwrite(get("8mer_final"),
+       paste0("08mer_mhcflurry_input_", suffix),
+       sep = ",", na = "NA", col.names = TRUE, quote = TRUE)
+
+fwrite(get("9mer_final"),
+       paste0("09mer_mhcflurry_input_", suffix),
+       sep = ",", na = "NA", col.names = TRUE, quote = TRUE)
+
+fwrite(get("10mer_final"),
+       paste0("10mer_mhcflurry_input_", suffix),
+       sep = ",", na = "NA", col.names = TRUE, quote = TRUE)
+
+fwrite(get("11mer_final"),
+       paste0("11mer_mhcflurry_input_", suffix),
+       sep = ",", na = "NA", col.names = TRUE, quote = TRUE)
+
+print("Step 14a: MHCflurry input CSVs generated with alleles extracted from OptiType results per sample.")
+
+###########################################################################
+#  WT SIDE (NEW): Generate MHCflurry input CSVs from WT/self n-mers -------
+###########################################################################
+# Purpose: Build the same peptide x allele expansion, but for the WT-derived
+# n-mers written by Step 12 (Step 7, *_mers_wt.tsv). Running these through
+# MHCflurry (Step 14b, WT side) gives the "self/WT antigen" predictions that
+# Step 15e uses to remove any ALT neoantigen (peptide + allele) that also
+# arises from the WT sequence, so it isn't miscounted as tumour-specific.
+
+nmers_08_wt_file <- "2023_0812_hlathenalist_msic_08mers_wt.tsv"
+nmers_09_wt_file <- "2023_0812_hlathenalist_msic_09mers_wt.tsv"
+nmers_10_wt_file <- "2023_0812_hlathenalist_msic_10mers_wt.tsv"
+nmers_11_wt_file <- "2023_0812_hlathenalist_msic_11mers_wt.tsv"
+
+setwd(directory_12)
+nmers_08_wt <- fread(nmers_08_wt_file, na.strings = c("", "NA"))
+nmers_09_wt <- fread(nmers_09_wt_file, na.strings = c("", "NA"))
+nmers_10_wt <- fread(nmers_10_wt_file, na.strings = c("", "NA"))
+nmers_11_wt <- fread(nmers_11_wt_file, na.strings = c("", "NA"))
+
+if ("TPM" %in% colnames(nmers_08_wt)) nmers_08_wt[, TPM := NULL]
+if ("TPM" %in% colnames(nmers_09_wt)) nmers_09_wt[, TPM := NULL]
+if ("TPM" %in% colnames(nmers_10_wt)) nmers_10_wt[, TPM := NULL]
+if ("TPM" %in% colnames(nmers_11_wt)) nmers_11_wt[, TPM := NULL]
+
+setnames(nmers_08_wt, old = colnames(nmers_08_wt), new = c("peptide", "n_flank", "c_flank"))
+setnames(nmers_09_wt, old = colnames(nmers_09_wt), new = c("peptide", "n_flank", "c_flank"))
+setnames(nmers_10_wt, old = colnames(nmers_10_wt), new = c("peptide", "n_flank", "c_flank"))
+setnames(nmers_11_wt, old = colnames(nmers_11_wt), new = c("peptide", "n_flank", "c_flank"))
+
+nmers_08_wt[, `:=`(n_flank = gsub("-", "", as.character(n_flank)), c_flank = gsub("-", "", as.character(c_flank)))]
+nmers_09_wt[, `:=`(n_flank = gsub("-", "", as.character(n_flank)), c_flank = gsub("-", "", as.character(c_flank)))]
+nmers_10_wt[, `:=`(n_flank = gsub("-", "", as.character(n_flank)), c_flank = gsub("-", "", as.character(c_flank)))]
+nmers_11_wt[, `:=`(n_flank = gsub("-", "", as.character(n_flank)), c_flank = gsub("-", "", as.character(c_flank)))]
+
+nmer_wt_dfs <- list(nmers_08_wt, nmers_09_wt, nmers_10_wt, nmers_11_wt)
+
+for (i in 1:4) {
+  nmer_i <- nmer_wt_dfs[[i]]
+  if (nrow(nmer_i) == 0 || nrow(alleles_dt) == 0) {
+    cat("Skipping WT", nmer_lengths[i], "mers: empty data.\n")
+    next
+  }
+
+  nmer_expanded    <- nmer_i[rep(1:.N, times = nrow(alleles_dt))]
+  alleles_repeated <- alleles_dt[rep(1:.N, each = nrow(nmer_i))]
+  nmer_all_wt      <- cbind(alleles_repeated, nmer_expanded)
+
+  if ("peptide.1" %in% names(nmer_all_wt)) {
+    setnames(nmer_all_wt, "peptide.1", "peptide")
+  }
+
+  # Same filter as the ALT side (NEW) -- WT peptides derived from
+  # selenoprotein genes will also contain "U" and would crash MHCflurry
+  # the same way.
+  n_before_wt <- nrow(nmer_all_wt)
+  nmer_all_wt <- nmer_all_wt[!grepl("[^ACDEFGHIKLMNPQRSTVWY]", peptide)]
+  n_removed_wt <- n_before_wt - nrow(nmer_all_wt)
+  if (n_removed_wt > 0) {
+    cat("  Removed", n_removed_wt, "WT peptide(s) with non-standard amino acids.\n")
+  }
+
+  assign(paste0(nmer_lengths[i], "mer_final_wt"), nmer_all_wt)
+  cat("Processed WT", nmer_lengths[i], "mers:", nrow(nmer_all_wt), "rows (peptides x alleles).\n")
 }
 
 setwd(directory_14)
-fwrite(nmers_08_final, paste0("08mer_mhcflurry_input_", run_date, ".csv"), sep = ",", na = "NA", col.names = TRUE, quote = TRUE)
-fwrite(nmers_09_final, paste0("09mer_mhcflurry_input_", run_date, ".csv"), sep = ",", na = "NA", col.names = TRUE, quote = TRUE)
-fwrite(nmers_10_final, paste0("10mer_mhcflurry_input_", run_date, ".csv"), sep = ",", na = "NA", col.names = TRUE, quote = TRUE)
-fwrite(nmers_11_final, paste0("11mer_mhcflurry_input_", run_date, ".csv"), sep = ",", na = "NA", col.names = TRUE, quote = TRUE)
+suffix_wt <- paste0("wt_", run_date, ".csv")
 
-print("Step 14: MHCflurry input generation complete")
+fwrite(get("8mer_final_wt"),
+       paste0("08mer_mhcflurry_input_", suffix_wt),
+       sep = ",", na = "NA", col.names = TRUE, quote = TRUE)
+
+fwrite(get("9mer_final_wt"),
+       paste0("09mer_mhcflurry_input_", suffix_wt),
+       sep = ",", na = "NA", col.names = TRUE, quote = TRUE)
+
+fwrite(get("10mer_final_wt"),
+       paste0("10mer_mhcflurry_input_", suffix_wt),
+       sep = ",", na = "NA", col.names = TRUE, quote = TRUE)
+
+fwrite(get("11mer_final_wt"),
+       paste0("11mer_mhcflurry_input_", suffix_wt),
+       sep = ",", na = "NA", col.names = TRUE, quote = TRUE)
+
+print("Step 14a (WT side): MHCflurry input CSVs generated for WT/self peptides, same alleles as ALT side.")
