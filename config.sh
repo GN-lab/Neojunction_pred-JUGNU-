@@ -2,8 +2,8 @@
 
 # ------------------------- Core Configuration --------------------------
 
-# Working directory (SSNIP root) - update if needed
-export WORKDIR=""
+# Working directory (JUGNU root) - update if needed
+export WORKDIR="your current dir"
 
 # Input and output directories
 export INPUT_DIR="${WORKDIR}/0_Input_Files"  # Purity metadata, GTF, TPM files, etc.
@@ -28,12 +28,12 @@ export PATH_TO_FASTA_UNIPROT="${INPUT_DIR}" # UP000005640_9606.fasta file (Step 
 export HLATHENA_OUTPUT_PATH="${OUTPUT_DIR}" # results of step 12
 export OPTITYPE_OUTPUT_DIR="../nextflow_HLAtyping/output_hartwig/optitype"
 
-# Thresholds (from SSNIP README)
+# Thresholds (from JUGNU README)
 export MIN_PURITY=0.60  # Tumor purity threshold (Step 01)
 export MIN_TPM=10  # TPM expression threshold (Step 03)
 export MIN_READ_COUNT=10  # Minimum reads for junction filtering (Step 05)
 
-# Additional filters (customizable, based on SSNIP logic)
+# Additional filters (customizable, based on JUGNU logic)
 export MIN_JUNC_OVERHANG=8  # Minimum junction overhang
 export MIN_INTRON_SIZE=20  # Minimum intron size
 export MAX_INTRON_SIZE=1000000  # Maximum intron size
@@ -43,7 +43,7 @@ export MIN_SAMPLES_PCT=0.10  # Minimum samples percentage for "public" junctions
 export MAX_GTEX_FREQUENCY=0.01  # Maximum GTEx frequency
 
 # R environment
-export R_LIBS_USER="/data/rds/DMP/UCEC/EVOLIMMU/graichand/R_libs"  # Your R library path
+export R_LIBS_USER="/data/R_libs"  # Your R library path
 
 # Script directories
 export NEOJUNCTION_DIR="${WORKDIR}/1_Neojunction_Calling"
@@ -59,4 +59,4 @@ mkdir -p "${WORKDIR}/logs" "${WORKDIR}/.checkpoints"
 # Other parameters
 export THREADS=24  # Adjust based on SLURM cpus-per-task (from your example)
 
-echo "[CONFIG] SSNIP config loaded from ${BASH_SOURCE[0]}"
+echo "[CONFIG] JUGNU config loaded from ${BASH_SOURCE[0]}"
