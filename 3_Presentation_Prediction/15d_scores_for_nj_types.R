@@ -1,17 +1,21 @@
 #!/usr/bin/env Rscript
 # Step 15d: Generate Figure 5i - Top validated NJs and their corresponding neoantigens
-# September 28, 2025 | Gaurav Raichand | The Institute of Cancer Research
+# November 25, 2025 | Gaurav Raichand | The Institute of Cancer Research
+# UPDATED: December 3, 2025 | Fixed for new MHCflurry format and dynamic HLA alleles
 
 # Purpose: Generate visualizations for neoantigen scores and identify top HLA alleles/neoantigens
 # Joins verified with perfect input overlap; substring matching for mapping metadata; no NAs/empty outputs
 # Fixes: Deduplicate inputs to avoid many-to-many joins and OOM; memory-efficient data.table usage
 # Patient list path hardcoded to "results/Patient_List_Post_TumorPurity_Filter_0.60.txt" based on your ls output
 
+
 ###########################################################################
 #  Step 0: Load Packages and Data -----------------------------------------
 ###########################################################################
 
+
 rm(list = ls(all.names = TRUE))
+
 
 library(tidyverse)
 library(ggsci)
@@ -21,51 +25,209 @@ library(gridExtra)
 library(parallel)
 library(doParallel)
 library(foreach)
-library(extrafont)
+library(Cairo)
 library(stringr)  # For substring matching
 
-# Font setup
-loadfonts(device = "pdf")
-if (!("Helvetica" %in% fonts())) warning("Helvetica not found; using default.")
 
 # Directories with fallbacks
 directory_15 <- Sys.getenv("STEP15_OUTPUT_DIR", getwd())
 directory_figures <- Sys.getenv("OUTPUT_DIR", getwd())
 directory_step10 <- Sys.getenv("STEP10_OUTPUT_DIR", getwd())
 
+
 current_date <- format(Sys.Date(), "%Y%m%d")
 
+
+# Set working directory to match config.sh OUTPUT_DIR
+setwd(Sys.getenv("OUTPUT_DIR", "results"))
+cat("Working in:", getwd(), "\n")
+
+
 # Define cache files
-CACHE_DIR <- "results/cache"
+CACHE_DIR <- "cache"
 dir.create(CACHE_DIR, showWarnings = FALSE)
+
 
 CACHE_ALL_MAP <- file.path(CACHE_DIR, "df_all_map_cached.rds")
 CACHE_NA_NJ_MAP <- file.path(CACHE_DIR, "df_na_nj_map_cached.rds")
 
+
+###########################################################################
+#  Helper Functions -------------------------------------------------------
+###########################################################################
+
+
+# Helper: pick most recent file matching a pattern
+latest_file <- function(pattern, dir = NULL) {
+  if (is.null(dir)) {
+    dir <- "."
+  }
+  files <- list.files(path = dir, pattern = pattern, full.names = TRUE)
+  if (length(files) == 0) {
+    stop("No files match pattern ", pattern, " in ", dir)
+  }
+  files[which.max(file.info(files)$mtime)]
+}
+
+
 ###########################################################################
 #  Step 0.5: Load or Compute Main Data (COMPUTATIONALLY INTENSIVE) --------
 ###########################################################################
+
 
 if (file.exists(CACHE_ALL_MAP)) {
   cat("Loading cached df_all_map...\n")
   df_all_map <- readRDS(CACHE_ALL_MAP)
 } else {
   cat("Computing df_all_map (this will take time)...\n")
-  
-  # Load MHCflurry output files as data.table
-  mf_patterns <- c("mhcflurry_08mer_selected_alleles_20250928.tsv", 
-                   "mhcflurry_09mer_selected_alleles_20250928.tsv", 
-                   "mhcflurry_10mer_selected_alleles_20250928.tsv", 
-                   "mhcflurry_11mer_selected_alleles_20250928.tsv")
-  mf_files <- paste0("results/", mf_patterns)
+
+  # Load MHCflurry top files (14c output -- one best allele per peptide)
+  mf_patterns <- c("^mhcflurry_08mer_top_\\d{8}\\.tsv$",
+                   "^mhcflurry_09mer_top_\\d{8}\\.tsv$",
+                   "^mhcflurry_10mer_top_\\d{8}\\.tsv$",
+                   "^mhcflurry_11mer_top_\\d{8}\\.tsv$")
+  mf_files <- lapply(mf_patterns, latest_file)
+  cat("MHCflurry TOP files:\n", paste(mf_files, collapse="\n"), "\n")
   df_all_map <- rbindlist(lapply(mf_files, fread), use.names = TRUE, fill = TRUE)
-  
-  # Load MHCflurry input files as data.table and deduplicate
-  input_patterns <- c("08mer_mhcflurry_input_2023_0812.csv", 
-                      "09mer_mhcflurry_input_2023_0812.csv", 
-                      "10mer_mhcflurry_input_2023_0812.csv", 
-                      "11mer_mhcflurry_input_2023_0812.csv")
-  input_files <- paste0("results/", input_patterns)
+  if ("mhcflurry_affinity" %in% names(df_all_map))
+    setnames(df_all_map, "mhcflurry_affinity", "mhcflurry_binding_affinity")
+
+  # WT filter -- remove any peptide+allele also found in WT MHCflurry predictions
+  # (presence alone disqualifies, regardless of score)
+  wt_patterns <- c("^08mers_flank_mhcflurry_wt_[0-9_]+\\.csv$",
+                   "^09mers_flank_mhcflurry_wt_[0-9_]+\\.csv$",
+                   "^10mers_flank_mhcflurry_wt_[0-9_]+\\.csv$",
+                   "^11mers_flank_mhcflurry_wt_[0-9_]+\\.csv$")
+  wt_files <- tryCatch(lapply(wt_patterns, latest_file), error = function(e) NULL)
+  if (!is.null(wt_files)) {
+    cat("Loading WT predictions for filter...\n")
+    wt_all <- rbindlist(lapply(wt_files, fread, na.strings = c("", "NA")),
+                        use.names = TRUE, fill = TRUE)
+    if ("mhcflurry_affinity" %in% names(wt_all))
+      setnames(wt_all, "mhcflurry_affinity", "mhcflurry_binding_affinity")
+    wt_set <- unique(wt_all[, .(peptide, allele)])
+    rm(wt_all); gc()
+    n_before <- nrow(df_all_map)
+    df_all_map <- df_all_map[!wt_set, on = .(peptide, allele)]
+    cat("WT filter: removed", n_before - nrow(df_all_map),
+        "| retained", nrow(df_all_map), "tumor-specific rows\n")
+    rm(wt_set)
+  } else {
+    cat("[WARNING] WT files not found -- skipping WT filter\n")
+  }
+
+  ###########################################################################
+  #  BED FILES (done first -- fast) -----------------------------------------
+  ###########################################################################
+  # Format: ENST_ID / AA_START / AA_END / PEPTIDE / HLA_ALLELE
+  # Source: 14c top files (best allele per peptide) filtered at <=500nM affinity
+  # ALT bed: tumor-specific peptides only (after WT filter above)
+  # WT bed:  native self immunopeptidome
+
+  AFFINITY_THRESHOLD <- 500  # nM
+
+  coord_map_files_bed <- c(
+    "2023_0812_peptide_coordinate_map_08mers.tsv",
+    "2023_0812_peptide_coordinate_map_09mers.tsv",
+    "2023_0812_peptide_coordinate_map_10mers.tsv",
+    "2023_0812_peptide_coordinate_map_11mers.tsv"
+  )
+
+  make_bed <- function(pep_dt, coord_map, label) {
+    # pep_dt must have: peptide, n_flank, c_flank, allele
+    # coord_map must have: n_mer, n_flank, c_flank, enst.model, aa_start, aa_end
+    joined <- merge(pep_dt, coord_map,
+                    by.x = c("peptide","n_flank","c_flank"),
+                    by.y = c("n_mer","n_flank","c_flank"),
+                    all.x = TRUE, allow.cartesian = TRUE)
+    bed <- unique(joined[!is.na(enst.model), .(
+      ENST_ID   = enst.model,
+      AA_START  = aa_start,
+      AA_END    = aa_end,
+      PEPTIDE   = peptide,
+      HLA_ALLELE = allele
+    )])
+    setorder(bed, ENST_ID, AA_START)
+    cat(label, "bed:", nrow(bed), "rows |",
+        uniqueN(bed$PEPTIDE), "unique peptides |",
+        uniqueN(bed$ENST_ID), "transcripts\n")
+    bed
+  }
+
+  if (all(file.exists(coord_map_files_bed))) {
+    coord_map_bed <- rbindlist(lapply(coord_map_files_bed, fread, na.strings = c("", "NA")),
+                               use.names = TRUE, fill = TRUE)
+    setnames(coord_map_bed, c("ctex_up","ctex_dn"), c("n_flank","c_flank"))
+
+    # ALT filtered bed -- tumor-specific peptides from df_all_map, <=500nM
+    if ("mhcflurry_binding_affinity" %in% names(df_all_map)) {
+      alt_peps <- df_all_map[mhcflurry_binding_affinity <= AFFINITY_THRESHOLD,
+                              .(peptide, n_flank, c_flank, allele)]
+    } else {
+      alt_peps <- df_all_map[, .(peptide, n_flank, c_flank, allele)]
+      cat("[WARNING] mhcflurry_binding_affinity not found -- using all ALT peptides\n")
+    }
+    alt_bed <- make_bed(alt_peps, coord_map_bed, "ALT filtered")
+    fwrite(alt_bed, paste0("immunopeptidome_alt_filtered_", current_date, ".bed"),
+           sep = "\t", col.names = TRUE, quote = FALSE)
+    cat("Wrote immunopeptidome_alt_filtered_", current_date, ".bed\n", sep = "")
+    rm(alt_peps, alt_bed)
+
+    # WT native bed -- from 14c WT top files, <=500nM
+    wt_top_pats <- c("^mhcflurry_08mer_wt_top_[0-9]{8}\\.tsv$",
+                     "^mhcflurry_09mer_wt_top_[0-9]{8}\\.tsv$",
+                     "^mhcflurry_10mer_wt_top_[0-9]{8}\\.tsv$",
+                     "^mhcflurry_11mer_wt_top_[0-9]{8}\\.tsv$")
+    wt_top_files <- tryCatch(lapply(wt_top_pats, latest_file), error = function(e) NULL)
+
+    if (!is.null(wt_top_files)) {
+      wt_top <- rbindlist(lapply(wt_top_files, fread, na.strings = c("", "NA")),
+                          use.names = TRUE, fill = TRUE)
+      if ("mhcflurry_affinity" %in% names(wt_top))
+        setnames(wt_top, "mhcflurry_affinity", "mhcflurry_binding_affinity")
+      wt_top <- wt_top[!is.na(mhcflurry_binding_affinity) &
+                         mhcflurry_binding_affinity <= AFFINITY_THRESHOLD]
+      cat("WT top after", AFFINITY_THRESHOLD, "nM filter:", nrow(wt_top), "rows\n")
+
+      # WT coordinate map from all_iterations files
+      wt_nmer_files <- c(
+        "2023_0802_all_iterations_wt_list_08mers.tsv",
+        "2023_0802_all_iterations_wt_list_09mers.tsv",
+        "2023_0802_all_iterations_wt_list_10mers.tsv",
+        "2023_0802_all_iterations_wt_list_11mers.tsv"
+      )
+      if (all(file.exists(wt_nmer_files))) {
+        wt_nmer_dt <- rbindlist(lapply(wt_nmer_files, fread, na.strings = c("", "NA")),
+                                use.names = TRUE, fill = TRUE)
+        wt_coord <- wt_nmer_dt[, .(n_mer, n_flank, c_flank, enst.model, aa_start, aa_end)]
+        wt_coord[, n_flank := stringr::str_pad(ifelse(is.na(n_flank),"",n_flank),30,"left", "-")]
+        wt_coord[, c_flank := stringr::str_pad(ifelse(is.na(c_flank),"",c_flank),30,"right","-")]
+        rm(wt_nmer_dt); gc()
+
+        wt_peps <- wt_top[, .(peptide, n_flank, c_flank, allele)]
+        wt_bed  <- make_bed(wt_peps, wt_coord, "WT native")
+        fwrite(wt_bed, paste0("immunopeptidome_wt_native_", current_date, ".bed"),
+               sep = "\t", col.names = TRUE, quote = FALSE)
+        cat("Wrote immunopeptidome_wt_native_", current_date, ".bed\n", sep = "")
+        rm(wt_top, wt_coord, wt_peps, wt_bed); gc()
+      } else {
+        cat("[WARNING] WT n-mer files not found -- skipping WT native bed\n")
+      }
+    } else {
+      cat("[WARNING] 14c WT top files not found -- skipping WT native bed\n")
+    }
+    rm(coord_map_bed); gc()
+  } else {
+    cat("[WARNING] Coordinate map files not found -- skipping bed files\n")
+  }
+
+  ###########################################################################
+  input_patterns <- c("^08mer_mhcflurry_input_.*\\.csv$",
+                      "^09mer_mhcflurry_input_.*\\.csv$",
+                      "^10mer_mhcflurry_input_.*\\.csv$",
+                      "^11mer_mhcflurry_input_.*\\.csv$")
+  input_files <- lapply(input_patterns, latest_file)
+  cat("Input files:\n", paste(input_files, collapse="\n"), "\n")
   df_input <- rbindlist(lapply(input_files, fread), use.names = TRUE, fill = TRUE)
   df_input <- unique(df_input, by = c("peptide", "allele"))
   
@@ -74,46 +236,85 @@ if (file.exists(CACHE_ALL_MAP)) {
   setkey(df_input, peptide, allele)
   df_all_map <- df_all_map[df_input, nomatch = NA]
   
-  # Load mapping for advanced metadata
-  mapping_file <- "results/2023_0812_complete_list_all_mers.tsv"
-  df_mapping <- fread(mapping_file)
-  
-  # Efficient substring matching
-  cat("Performing substring matching...\n")
-  chunk_size <- 10000
-  num_chunks <- ceiling(nrow(df_all_map) / chunk_size)
-  mapping_results <- list()
-  
-  for (chunk in 1:num_chunks) {
-    start <- (chunk - 1) * chunk_size + 1
-    end <- min(chunk * chunk_size, nrow(df_all_map))
-    chunk_pep <- df_all_map$peptide[start:end]
-    
-    # Parallel lookup for chunk
+  # Fast junction mapping via coordinate map join (replaces slow substring match)
+  # The coordinate map (written by Step 12) keys each peptide+flank combination
+  # directly to its junc.id -- no grep needed, just a table join.
+  coord_map_files <- c(
+    "2023_0812_peptide_coordinate_map_08mers.tsv",
+    "2023_0812_peptide_coordinate_map_09mers.tsv",
+    "2023_0812_peptide_coordinate_map_10mers.tsv",
+    "2023_0812_peptide_coordinate_map_11mers.tsv"
+  )
+
+  if (all(file.exists(coord_map_files))) {
+    coord_map <- rbindlist(lapply(coord_map_files, fread, na.strings = c("", "NA")),
+                           use.names = TRUE, fill = TRUE)
+    # coord_map uses ctex_up/ctex_dn; df_all_map uses n_flank/c_flank
+    setnames(coord_map, c("ctex_up","ctex_dn"), c("n_flank","c_flank"))
+    coord_map <- unique(coord_map[, .(n_mer, n_flank, c_flank, junc.id)])
+
+    df_all_map <- merge(df_all_map, coord_map,
+                        by.x = c("peptide","n_flank","c_flank"),
+                        by.y = c("n_mer","n_flank","c_flank"),
+                        all.x = TRUE)
+    cat("Attached junc.id to", sum(!is.na(df_all_map$junc.id)),
+        "of", nrow(df_all_map), "rows via coordinate map\n")
+    rm(coord_map); gc()
+  } else {
+    cat("[WARNING] Coordinate map files not found -- falling back to substring match (slow).\n")
+    df_mapping <- fread(mapping_file)
     cl <- makeCluster(detectCores() - 1)
+    clusterExport(cl, c("df_mapping"), envir = environment())
     registerDoParallel(cl)
-    chunk_results <- foreach(p = chunk_pep, .combine = rbind, .packages = "stringr") %dopar% {
-      match_idx <- which(str_detect(df_mapping$`aa.seq.alt`, fixed(p)))[1]
-      if (is.na(match_idx)) {
-        data.frame(junc.id = "Unknown", type = "Unknown", fs = "Unknown")
-      } else {
-        aa_change <- df_mapping$aa.change[match_idx]
-        fs_derived <- ifelse(str_detect(aa_change, "shift|fs") | (df_mapping$ln.diff[match_idx] %% 3 != 0), "fs", "in-frame")
-        data.frame(junc.id = df_mapping$junc.id[match_idx], type = df_mapping$type[match_idx], fs = fs_derived)
+    chunk_size <- 10000
+    num_chunks <- ceiling(nrow(df_all_map) / chunk_size)
+    mapping_results <- list()
+    for (chunk in 1:num_chunks) {
+      start <- (chunk - 1) * chunk_size + 1
+      end <- min(chunk * chunk_size, nrow(df_all_map))
+      chunk_pep <- df_all_map$peptide[start:end]
+      chunk_results <- foreach(p = chunk_pep, .combine = rbind,
+                               .packages = c("stringr","data.table")) %dopar% {
+        match_idx <- which(str_detect(df_mapping$aa.seq.alt, fixed(p)))[1]
+        if (is.na(match_idx)) {
+          data.frame(junc.id="Unknown", type="Unknown", fs="Unknown", stringsAsFactors=FALSE)
+        } else {
+          aa_change <- df_mapping$aa.change[match_idx]
+          fs_d <- ifelse(str_detect(aa_change,"shift|fs") |
+                           (df_mapping$ln.diff[match_idx] %% 3 != 0), "fs", "in-frame")
+          data.frame(junc.id=df_mapping$junc.id[match_idx],
+                     type=df_mapping$type[match_idx], fs=fs_d, stringsAsFactors=FALSE)
+        }
       }
+      mapping_results[[chunk]] <- chunk_results
+      cat(sprintf("Chunk %d/%d\n", chunk, num_chunks))
     }
     stopCluster(cl)
-    
-    mapping_results[[chunk]] <- chunk_results
-    cat(sprintf("Processed chunk %d/%d\n", chunk, num_chunks))
+    mapping_results <- rbindlist(mapping_results)
+    df_all_map[, c("junc.id","type","fs") := mapping_results]
   }
+
+  # Get type and fs from mapping file via junc.id join (fast)
+  df_mapping <- fread(mapping_file)
+  map_lookup <- unique(df_mapping[, .(junc.id, type,
+                                       fs = fifelse(grepl("shift|fs", aa.change) |
+                                                      (ln.diff %% 3 != 0), "fs", "in-frame"))])
+  df_all_map <- merge(df_all_map, map_lookup, by = "junc.id", all.x = TRUE)
+  df_all_map[is.na(type), type := "OTHERS"]
+  df_all_map[is.na(fs),   fs   := "in-frame"]
+  cat("Junction type/fs mapped for", sum(!is.na(df_all_map$type)), "rows\n")
   
-  mapping_results <- rbindlist(mapping_results)
+  # FIX: Calculate percentile from binding affinity (since column doesn't exist in new files)
+  cat("Calculating binding affinity percentiles...\n")
+  df_all_map[, mhcflurry_affinity_percentile := rank(mhcflurry_binding_affinity) / .N * 100]
   
-  # Bind and mutate with data.table for efficiency
-  df_all_map[, c("junc.id", "type", "fs") := mapping_results]
-  df_all_map[, score_average := (mhcflurry_affinity + mhcflurry_presentation_score) / 2]
+  # FIX: Normalize binding affinity for score calculation (lower affinity = better)
+  df_all_map[, binding_norm := 1 - (mhcflurry_binding_affinity / max(mhcflurry_binding_affinity, na.rm = TRUE))]
+  df_all_map[, score_average := (binding_norm + mhcflurry_presentation_score) / 2]
+  
+  # FIX: Use calculated percentile for classification
   df_all_map[, shared := fifelse(mhcflurry_affinity_percentile <= 10, "Top 10%tile in MF", "Other")]
+  
   df_all_map[, hla_allele := allele]
   df_all_map[, type := fifelse(type == "Unknown", "OTHERS", type)]
   df_all_map[, fs := fifelse(fs == "Unknown", "in-frame", fs)]
@@ -122,6 +323,7 @@ if (file.exists(CACHE_ALL_MAP)) {
   saveRDS(df_all_map, CACHE_ALL_MAP)
   cat("Saved df_all_map to cache\n")
 }
+
 
 if (file.exists(CACHE_NA_NJ_MAP)) {
   cat("Loading cached df_na_nj_map...\n")
@@ -133,103 +335,127 @@ if (file.exists(CACHE_NA_NJ_MAP)) {
   df_na_nj_map <- df_all_map[shared == "Top 10%tile in MF"]
   if (nrow(df_na_nj_map) == 0) stop("No top peptides. Adjust criteria.")
   
-  # Load neojunction details
-  get_latest_file <- function(dir, pattern) {
-    files <- list.files(dir, pattern = pattern, full.names = TRUE)
-    if (length(files) == 0) stop(paste("No files matching", pattern, "in", dir))
-    files[order(file.mtime(files), decreasing = TRUE)][1]
-  }
-  
-  psr_neo <- fread(get_latest_file(directory_step10, "^PSR_Neojunctions_[0-9]{8}\\.tsv$"))
-  count_neo <- fread(get_latest_file(directory_step10, "^Count_Table_Retained_and_Passed_Junctions_[0-9]{8}\\.tsv$"))
+  # Load neojunction details (use latest_file for flexibility)
+  psr_neo <- fread(latest_file("^PSR_Neojunctions_\\d{8}\\.tsv$"))
+  count_neo_detail <- fread(latest_file("^Count_Table_Retained_and_Passed_Junctions_\\d{8}\\.tsv$"))
   
   # Join with data.table
   setkey(df_na_nj_map, junc.id)
   setkey(psr_neo, junc.id)
-  setkey(count_neo, junc.id)
-  df_na_nj_map <- df_na_nj_map[psr_neo][count_neo]
+  setkey(count_neo_detail, junc.id)
+  df_na_nj_map <- df_na_nj_map[psr_neo][count_neo_detail]
   
   # Save to cache
   saveRDS(df_na_nj_map, CACHE_NA_NJ_MAP)
   cat("Saved df_na_nj_map to cache\n")
 }
 
+
 # Load patient list (this is quick)
-patient_list_file <- "results/Patient_List_Post_TumorPurity_Filter_0.60.txt"
+patient_list_file <- "Patient_List_Post_TumorPurity_Filter_0.60.txt"
 if (!file.exists(patient_list_file)) stop("Patient list not found.")
 patient_list <- fread(patient_list_file)
+
 
 ###########################################################################
 #  Step 1. Plot FS NJ's neoantigen scores for the top neoantigens ---------
 ###########################################################################
 
+
 df_fs <- df_na_nj_map[fs == "fs", .(hla_allele, score_average)]
 df_if <- df_na_nj_map[fs == "in-frame", .(hla_allele, score_average)]
+
 
 df_combined <- rbind(
   df_fs[, type := paste0("Frame-shift (n=", .N, ")")],
   df_if[, type := paste0("In-frame (n=", .N, ")")]
 )
 
-hla_colors <- c("HLA-A0101" = "#390099", "HLA-A0201" = "#9e0059", "HLA-A0301" = "#ff0054", "HLA-A1101" = "#ff5400", "HLA-A2402" = "#ffbd00")
 
-p_jitter_fs_if <- ggplot(df_combined, aes(x = type, y = score_average, color = hla_allele)) + 
+# FIX: Generate dynamic color palette for HLA alleles
+hla_alleles <- unique(df_combined$hla_allele)
+n_hla <- length(hla_alleles)
+cat("Found", n_hla, "HLA alleles:", paste(hla_alleles, collapse=", "), "\n")
+
+# Create color palette (using Set3 for distinct colors)
+if (n_hla <= 12) {
+  hla_colors <- brewer.pal(max(3, n_hla), "Set3")
+} else {
+  hla_colors <- colorRampPalette(brewer.pal(12, "Set3"))(n_hla)
+}
+names(hla_colors) <- hla_alleles
+
+
+p_jitter_fs_if <- ggplot(df_combined, aes(x = type, y = score_average, color = hla_allele)) +
   geom_jitter(width = 0.2, alpha = 0.7, size = 2) +
   scale_color_manual(values = hla_colors) +
   theme_bw() +
-  theme(axis.text.x = element_text(family = "Helvetica", size = 12, face = "bold"),
-        axis.text.y = element_text(family = "Helvetica", size = 12, face = "bold"),
+  theme(axis.text.x = element_text(size = 12, face = "bold"),
+        axis.text.y = element_text(size = 12, face = "bold"),
         axis.title.x = element_blank(),
-        axis.title.y = element_text(family = "Helvetica", size = 12, face = "bold"),
-        legend.text = element_text(family = "Helvetica", size = 12),
-        legend.title = element_text(family = "Helvetica", size = 12, face = "bold")) +
-  labs(y = "Average presentation score")
+        axis.title.y = element_text(size = 12, face = "bold"),
+        legend.text = element_text(size = 10),
+        legend.title = element_text(size = 12, face = "bold"),
+        legend.key.size = unit(0.5, "cm")) +
+  labs(y = "Average presentation score") +
+  guides(color = guide_legend(ncol = 2, title = "HLA Allele"))
+
 
 setwd(directory_figures)
-ggsave(paste0("figure_5i_fs_if_jitter_", current_date, ".pdf"), plot = p_jitter_fs_if, width = 8, height = 6)
-ggsave(paste0("figure_5i_fs_if_jitter_", current_date, ".png"), plot = p_jitter_fs_if, width = 8, height = 6)
+ggsave(paste0("figure_5i_fs_if_jitter_", current_date, ".pdf"), plot = p_jitter_fs_if, width = 10, height = 6)
+ggsave(paste0("figure_5i_fs_if_jitter_", current_date, ".png"), plot = p_jitter_fs_if, width = 10, height = 6)
+
 
 df_all <- rbind(
   df_fs[, type := "Frame-shift"],
   df_if[, type := "In-frame"]
 )
 
+
 p_box_fs_if <- ggplot(df_all, aes(x = hla_allele, y = score_average, fill = type)) +
   geom_boxplot(position = position_dodge()) +
   labs(x = "HLA Allele", y = "Immunogenicity Score") +
   scale_fill_manual(values = c("Frame-shift" = "#006e90", "In-frame" = "#f18f01")) +
   theme_bw() +
-  theme(axis.text.x = element_text(family = "Helvetica", size = 10, face = "bold", angle = 90, hjust = 1),
-        axis.text.y = element_text(family = "Helvetica", size = 10, face = "bold"),
+  theme(axis.text.x = element_text(size = 10, face = "bold", angle = 90, hjust = 1),
+        axis.text.y = element_text(size = 10, face = "bold"),
         axis.title.x = element_blank(),
-        axis.title.y = element_text(family = "Helvetica", size = 12, face = "bold"),
+        axis.title.y = element_text(size = 12, face = "bold"),
         legend.position = "bottom")
 
-ggsave(paste0("figure_5i_fs_if_boxplot_", current_date, ".pdf"), plot = p_box_fs_if, width = 8, height = 6)
-ggsave(paste0("figure_5i_fs_if_boxplot_", current_date, ".png"), plot = p_box_fs_if, width = 8, height = 6)
+
+ggsave(paste0("figure_5i_fs_if_boxplot_", current_date, ".pdf"), plot = p_box_fs_if, 
+       width = min(50, max(8, n_hla * 0.5)), height = 6, limitsize = FALSE)
+ggsave(paste0("figure_5i_fs_if_boxplot_", current_date, ".png"), plot = p_box_fs_if, 
+       width = min(50, max(8, n_hla * 0.5)), height = 6, limitsize = FALSE)
 
 ###########################################################################
 #  Step 2. Plot FS NJ's neoantigen scores for ALL neoantigens ------------
 ###########################################################################
 
+
 hist <- df_all_map[, .(hla_allele, score_average, fs)]
 hist[, fs := fifelse(fs == "fs", "Frame-shift", "In-frame")]
 hist[, score_log2 := log2(score_average + 0.001)]
 
+
 p_density_fs_if <- ggplot(hist, aes(x = score_log2, fill = fs)) +
-  geom_density(alpha = 0.5) + 
-  theme_minimal() + 
-  scale_fill_manual(values = c("Frame-shift" = "#006e90", "In-frame" = "#f18f01")) + 
+  geom_density(alpha = 0.5) +
+  theme_minimal() +
+  scale_fill_manual(values = c("Frame-shift" = "#006e90", "In-frame" = "#f18f01")) +
   labs(x = "log2(Average presentation score)", y = "Density", fill = "Type") +
-  theme(text = element_text(size = 20, family = "Helvetica"),
+  theme(text = element_text(size = 20),
         panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
 
 ggsave(paste0("figure_5i_fs_if_density_all_", current_date, ".pdf"), plot = p_density_fs_if, width = 8, height = 5)
 ggsave(paste0("figure_5i_fs_if_density_all_", current_date, ".png"), plot = p_density_fs_if, width = 8, height = 5)
 
+
 ###########################################################################
 #  Step 3. Plot TYPE NJ's neoantigen scores for the top neoantigens -------
 ###########################################################################
+
 
 df_a3loss <- df_na_nj_map[type == "A3.loss", .(hla_allele, score_average)][, type := paste0("A3 loss (n=", .N, ")")]
 df_a3gain <- df_na_nj_map[type == "A3.gain", .(hla_allele, score_average)][, type := paste0("A3 gain (n=", .N, ")")]
@@ -240,22 +466,27 @@ df_juncex <- df_na_nj_map[type == "JUNC.WITHIN.INTRON", .(hla_allele, score_aver
 df_exskip <- df_na_nj_map[type == "ES", .(hla_allele, score_average)][, type := paste0("ES (n=", .N, ")")]
 df_others <- df_na_nj_map[type == "OTHERS", .(hla_allele, score_average)][, type := paste0("OTHERS (n=", .N, ")")]
 
+
 df_combined_types <- rbind(df_a3loss, df_a3gain, df_a5loss, df_a5gain, df_juncin, df_juncex, df_exskip, df_others, fill = TRUE)
 
-p_jitter_types <- ggplot(df_combined_types, aes(x = type, y = score_average, color = hla_allele)) + 
+
+p_jitter_types <- ggplot(df_combined_types, aes(x = type, y = score_average, color = hla_allele)) +
   geom_jitter(width = 0.2, alpha = 0.7, size = 2) +
   scale_color_manual(values = hla_colors) +
   theme_bw() +
-  theme(axis.text.x = element_text(family = "Helvetica", size = 10, face = "bold", angle = 0, hjust = 0.5),
-        axis.text.y = element_text(family = "Helvetica", size = 10, face = "bold"),
+  theme(axis.text.x = element_text(size = 10, face = "bold", angle = 0, hjust = 0.5),
+        axis.text.y = element_text(size = 10, face = "bold"),
         axis.title.x = element_blank(),
-        axis.title.y = element_text(family = "Helvetica", size = 12, face = "bold"),
-        legend.text = element_text(family = "Helvetica", size = 10),
-        legend.title = element_text(family = "Helvetica", size = 10, face = "bold")) +
-  labs(y = "Average presentation score")
+        axis.title.y = element_text(size = 12, face = "bold"),
+        legend.text = element_text(size = 10),
+        legend.title = element_text(size = 10, face = "bold")) +
+  labs(y = "Average presentation score") +
+  guides(color = guide_legend(ncol = 2, title = "HLA Allele"))
 
-ggsave(paste0("figure_5i_splice_types_jitter_", current_date, ".pdf"), plot = p_jitter_types, width = 10, height = 6)
-ggsave(paste0("figure_5i_splice_types_jitter_", current_date, ".png"), plot = p_jitter_types, width = 10, height = 6)
+
+ggsave(paste0("figure_5i_splice_types_jitter_", current_date, ".pdf"), plot = p_jitter_types, width = 12, height = 6)
+ggsave(paste0("figure_5i_splice_types_jitter_", current_date, ".png"), plot = p_jitter_types, width = 12, height = 6)
+
 
 df_all_types <- rbind(
   df_a3loss[, type := "A3.loss"],
@@ -269,6 +500,7 @@ df_all_types <- rbind(
   fill = TRUE
 )
 
+
 p_box_types <- ggplot(df_all_types, aes(x = hla_allele, y = score_average, fill = type)) +
   geom_boxplot(position = position_dodge()) +
   labs(x = "HLA Allele", y = "Immunogenicity Score") +
@@ -277,15 +509,19 @@ p_box_types <- ggplot(df_all_types, aes(x = hla_allele, y = score_average, fill 
                                "ES" = "#90be6d", "JUNC.WITHIN.EXON" = "#43aa8b",
                                "JUNC.WITHIN.INTRON" = "#4d908e", "OTHERS" = "#577590")) +
   theme_bw() +
-  theme(axis.text.x = element_text(family = "Helvetica", size = 10, face = "bold", angle = 90, hjust = 1),
-        axis.text.y = element_text(family = "Helvetica", size = 10, face = "bold"),
+  theme(axis.text.x = element_text(size = 10, face = "bold", angle = 90, hjust = 1),
+        axis.text.y = element_text(size = 10, face = "bold"),
         axis.title.x = element_blank(),
-        axis.title.y = element_text(family = "Helvetica", size = 12, face = "bold"),
-        legend.position = "bottom")
+        axis.title.y = element_text(size = 12, face = "bold"),
+        legend.position = "bottom") +
+  guides(fill = guide_legend(ncol = 3, title = "Junction Type"))
 
-ggsave(paste0("figure_5i_splice_types_boxplot_", current_date, ".pdf"), plot = p_box_types, width = 10, height = 6)
-ggsave(paste0("figure_5i_splice_types_boxplot_", current_date, ".png"), plot = p_box_types, width = 10, height = 6)
-
+width_box <- max(10, n_hla * 0.6)
+ggsave(paste0("figure_5i_splice_types_boxplot_", current_date, ".pdf"), plot = p_box_types, 
+       width = width_box, height = 6, limitsize = FALSE)
+ggsave(paste0("figure_5i_splice_types_boxplot_", current_date, ".png"), plot = p_box_types, 
+       width = width_box, height = 6, limitsize = FALSE)
+       
 ###########################################################################
 #  Step 4. Plot TYPE NJ's neoantigen scores for ALL neoantigens -----------
 ###########################################################################
@@ -293,115 +529,214 @@ ggsave(paste0("figure_5i_splice_types_boxplot_", current_date, ".png"), plot = p
 hist_all <- df_all_map[, .(hla_allele, score_average, type)]
 hist_all[, score_log2 := log2(score_average + 0.001)]
 
-hist_0101 <- hist_all[hla_allele == "HLA-A0101"]
-hist_0201 <- hist_all[hla_allele == "HLA-A0201"]
-hist_0301 <- hist_all[hla_allele == "HLA-A0301"]
-hist_1101 <- hist_all[hla_allele == "HLA-A1101"]
-hist_2402 <- hist_all[hla_allele == "HLA-A2402"]
+# Get all unique HLA alleles
+hla_alleles_all <- unique(hist_all$hla_allele)
+n_hla_all <- length(hla_alleles_all)
+cat("Found", n_hla_all, "HLA alleles\n")
 
-create_density_plot <- function(data, allele) {
-  x_min <- min(data$score_log2, na.rm = TRUE)
-  x_max <- max(data$score_log2, na.rm = TRUE)
-  ggplot(data, aes(x = score_log2, fill = type)) +
+# STRATEGY: Select top N alleles by neoantigen count
+TOP_N_ALLELES <- 15
+
+# Count neoantigens per allele and select top N
+allele_counts <- hist_all[, .N, by = hla_allele][order(-N)]
+top_alleles <- allele_counts[1:min(TOP_N_ALLELES, nrow(allele_counts)), hla_allele]
+
+cat("Selected top", length(top_alleles), "HLA alleles by neoantigen count\n")
+
+# Filter for top alleles
+hist_top <- hist_all[hla_allele %in% top_alleles]
+
+# Create individual density plots for each top allele
+plot_list <- lapply(top_alleles, function(allele) {
+  hist_subset <- hist_top[hla_allele == allele]
+  n_neo <- nrow(hist_subset)
+  
+  ggplot(hist_subset, aes(x = score_log2, fill = type)) +
     geom_density(alpha = 0.5) +
-    labs(x = paste0("log2(Average presentation score) (", allele, ")"), y = "Density") +
+    labs(x = paste0("log2(Average presentation score) (", allele, ", n=", n_neo, ")"), 
+         y = "Density",
+         title = allele) +
     scale_fill_manual(values = c("A3.gain" = "#f94144", "A3.loss" = "#f3722c",
                                  "A5.gain" = "#f8961e", "A5.loss" = "#f9c74f",
                                  "ES" = "#90be6d", "JUNC.WITHIN.EXON" = "#43aa8b",
                                  "JUNC.WITHIN.INTRON" = "#4d908e", "OTHERS" = "#577590")) +
-    xlim(x_min, x_max) +
-    theme_bw()
+    theme_bw() +
+    theme(legend.position = "bottom", 
+          legend.text = element_text(size = 9),
+          legend.key.size = unit(0.3, "cm"),
+          plot.title = element_text(size = 10, face = "bold"),
+          axis.text = element_text(size = 8)) +
+    guides(fill = guide_legend(ncol = 2, title = "Junction Type"))
+})
+
+# FIX: Use pdf() device instead of ggsave()
+setwd(directory_figures)
+
+pdf(paste0("figure_5i_splice_types_density_top", TOP_N_ALLELES, "_", current_date, ".pdf"), 
+    width = 10, height = 6)
+
+p_arranged <- grid.arrange(grobs = plot_list, ncol = 1, heights = rep(1, length(plot_list)))
+print(p_arranged)
+
+dev.off()
+
+cat("✅ Saved top", TOP_N_ALLELES, "alleles to PDF\n")
+
+CairoPNG(paste0("figure_5i_splice_types_density_top", TOP_N_ALLELES, "_", current_date, ".png"), 
+         width = 10, height = 6, units = "in", res = 150)
+
+p_arranged <- grid.arrange(grobs = plot_list, ncol = 1, heights = rep(1, length(plot_list)))
+print(p_arranged)
+
+dev.off()
+
+cat("✅ Saved to:", paste0("figure_5i_splice_types_density_top", TOP_N_ALLELES, "_", current_date, ".pdf\n"))
+cat("✅ Saved to:", paste0("figure_5i_splice_types_density_top", TOP_N_ALLELES, "_", current_date, ".png\n"))
+
+###########################################################################
+#  OPTIONAL: Save all 105 alleles as paginated PDF (supplementary) --------
+###########################################################################
+
+cat("Generating supplementary archive (all", n_hla_all, "alleles)...\n")
+
+# Use pdf() device for paginated output - NO SIZE LIMIT!
+pdf(paste0("figure_5i_splice_types_density_ALL_archive_", current_date, ".pdf"), 
+    width = 10, height = 6)
+
+for(i in seq_along(hla_alleles_all)) {
+  allele <- hla_alleles_all[i]
+  hist_subset <- hist_all[hla_allele == allele]
+  n_neo <- nrow(hist_subset)
+  
+  p <- ggplot(hist_subset, aes(x = score_log2, fill = type)) +
+    geom_density(alpha = 0.5) +
+    labs(title = paste0(allele, " (n=", n_neo, ")"),
+         x = "log2(Average presentation score)", 
+         y = "Density") +
+    scale_fill_manual(values = c("A3.gain" = "#f94144", "A3.loss" = "#f3722c",
+                                 "A5.gain" = "#f8961e", "A5.loss" = "#f9c74f",
+                                 "ES" = "#90be6d", "JUNC.WITHIN.EXON" = "#43aa8b",
+                                 "JUNC.WITHIN.INTRON" = "#4d908e", "OTHERS" = "#577590")) +
+    theme_bw() +
+    theme(legend.position = "bottom", 
+          legend.text = element_text(size = 9),
+          legend.key.size = unit(0.3, "cm")) +
+    guides(fill = guide_legend(ncol = 2, title = "Junction Type"))
+  
+  print(p)
+  
+  if(i %% 10 == 0) cat("Processed", i, "/", n_hla_all, "alleles\n")
 }
 
-gg_0101 <- create_density_plot(hist_0101, "HLA-A*01:01")
-gg_0201 <- create_density_plot(hist_0201, "HLA-A*02:01")
-gg_0301 <- create_density_plot(hist_0301, "HLA-A*03:01")
-gg_1101 <- create_density_plot(hist_1101, "HLA-A*11:01")
-gg_2402 <- create_density_plot(hist_2402, "HLA-A*24:02")
+dev.off()
 
-p_arranged <- grid.arrange(gg_0101, gg_0201, gg_0301, gg_1101, gg_2402, ncol = 1)
-ggsave(paste0("figure_5i_splice_types_density_all_", current_date, ".pdf"), plot = p_arranged, width = 8, height = 10)
-ggsave(paste0("figure_5i_splice_types_density_all_", current_date, ".png"), plot = p_arranged, width = 8, height = 10)
+cat("✅ Saved all", n_hla_all, "alleles to:", 
+    paste0("figure_5i_splice_types_density_ALL_archive_", current_date, ".pdf\n"))
+
+###########################################################################
+#  Summary ----------------------------------------------------------------
+###########################################################################
+
+cat("\n=== FIGURE 5i GENERATION COMPLETE ===\n")
+cat("Main figure (top", TOP_N_ALLELES, "alleles):\n")
+cat("  PDF:", paste0("figure_5i_splice_types_density_top", TOP_N_ALLELES, "_", current_date, ".pdf\n"))
+cat("  PNG:", paste0("figure_5i_splice_types_density_top", TOP_N_ALLELES, "_", current_date, ".png\n"))
+cat("\nSupplementary archive (all", n_hla_all, "alleles):\n")
+cat("  PDF:", paste0("figure_5i_splice_types_density_ALL_archive_", current_date, ".pdf\n"))
+cat("  Pages:", n_hla_all, "\n")
 
 ###########################################################################
 #  Step 5. Identify Top HLA Alleles and Neoantigens (MATRIX FORMAT) -------
 ###########################################################################
 
-# Load cached data
-cat("Loading cached data...\n")
-cache_dir <- file.path(directory_15, "cache")
-cache_all_map <- file.path(cache_dir, "df_all_map_cached.rds")
-df_all_map <- readRDS(cache_all_map)
+
+cat("Using cached df_all_map for Step 5...\n")
+
 
 # Select top 10% by score_average
 top_neo <- df_all_map[order(-score_average)][1:round(0.1 * .N)]
 cat("Selected", nrow(top_neo), "top neoantigens\n")
 
-# Define absolute path to Count_Neojunctions (from your pwd/ls output)
-count_neo_file <- "/home/csalas/csalas_rds/gaurav_rds/Neojuction_pred/SSNIP/results/Count_Neojunctions_20250927.tsv"
 
-# Check if file exists; fallback to pattern match if not
-if (!file.exists(count_neo_file)) {
-  warning("Exact file not found. Searching for latest matching file...")
-  count_neo_pattern <- "^Count_Neojunctions_[0-9]{8}\\.tsv$"
-  count_neo_file <- get_latest_file("results", count_neo_pattern)  # Search in results/
-  if (is.null(count_neo_file) || !file.exists(count_neo_file)) {
-    stop("Count_Neojunctions file not found. Run list.files('results', pattern='Count_Neojunctions') to verify.")
-  }
-}
+# Load Count_Neojunctions
+count_neo_file <- latest_file("^Count_Neojunctions_\\d{8}\\.tsv$")
 count_neo <- fread(count_neo_file)
 cat("Loaded Count_Neojunctions from:", count_neo_file, "\n")
+
 
 # Get sample names (remove trailing dots)
 sample_names <- names(count_neo)[-1]  # Remove junc.id column
 sample_names <- sub("\\.$", "", sample_names)
 cat("Found", length(sample_names), "samples in Count_Neojunctions\n")
 
+
 # Create a unique neoantigen identifier
 top_neo[, neo_id := paste(peptide, junc.id, hla_allele, sep = "|")]
 
+
 # Initialize empty matrix: rows = neoantigens, columns = samples
-neo_matrix <- as.data.table(matrix(NA, 
-                                   nrow = nrow(top_neo), 
+neo_matrix <- as.data.table(matrix(NA,
+                                   nrow = nrow(top_neo),
                                    ncol = length(sample_names),
                                    dimnames = list(NULL, sample_names)))
 
+
 # Add neoantigen metadata as first columns
-neo_matrix[, c("neo_id", "peptide", "junc.id", "hla_allele", "score_average", "type", "fs", "shared") := 
-             list(top_neo$neo_id, top_neo$peptide, top_neo$junc.id, top_neo$hla_allele, 
-                  top_neo$score_average, top_neo$type, top_neo$fs, top_neo$shared)]
+neo_matrix[, c("neo_id", "peptide", "junc.id", "hla_allele", "score_average", "type", "fs", "shared", "mhcflurry_affinity_percentile", "mhcflurry_binding_affinity", "mhcflurry_presentation_score") :=
+             list(top_neo$neo_id, top_neo$peptide, top_neo$junc.id, top_neo$hla_allele,
+                  top_neo$score_average, top_neo$type, top_neo$fs, top_neo$shared,
+                  top_neo$mhcflurry_affinity_percentile, top_neo$mhcflurry_binding_affinity, top_neo$mhcflurry_presentation_score)]
+
 
 # Reorder columns to have metadata first, then samples
-setcolorder(neo_matrix, c("neo_id", "peptide", "junc.id", "hla_allele", "score_average", "type", "fs", "shared", sample_names))
+setcolorder(neo_matrix, c("neo_id", "peptide", "junc.id", "hla_allele", "score_average", 
+                          "mhcflurry_affinity_percentile", "mhcflurry_binding_affinity", "mhcflurry_presentation_score",
+                          "type", "fs", "shared", sample_names))
 
-# For each junc.id in top_neo, check which samples have this junction and copy the score
-cat("Mapping scores to samples...\n")
-for(i in 1:nrow(top_neo)) {
-  current_junc <- top_neo$junc.id[i]
-  current_score <- top_neo$score_average[i]
-  
-  # Find which samples have this junction (count > 0)
-  junc_samples <- count_neo[junc.id == current_junc]
-  if(nrow(junc_samples) > 0) {
-    # Get sample names where this junction is present
-    present_samples <- names(junc_samples)[-1][as.numeric(junc_samples[1, -1]) > 0]
-    present_samples <- sub("\\.$", "", present_samples)
-    
-    # Set scores for these samples
-    for(sample in present_samples) {
-      if(sample %in% names(neo_matrix)) {
-        set(neo_matrix, i = i, j = sample, value = current_score)
-      }
-    }
-  }
-  
-  if(i %% 1000 == 0) cat("Processed", i, "/", nrow(top_neo), "neoantigens\n")
-}
+
+# Fast per-sample matrix using dcast (replaces slow nested for loop)
+# melt count_neo to long, join scores, dcast back to wide -- seconds not days
+cat("Building per-sample score matrix (fast)...\n")
+
+count_long <- melt(count_neo, id.vars = "junc.id",
+                   variable.name = "sample", value.name = "count")
+count_long[, sample := sub("\\.$", "", as.character(sample))]
+count_long <- count_long[count > 0]
+
+# Join neoantigen scores via junc.id
+setkey(top_neo, junc.id)
+setkey(count_long, junc.id)
+score_long <- merge(count_long, top_neo[, .(junc.id, neo_id, score_average)],
+                    by = "junc.id", allow.cartesian = TRUE)
+
+# Cast to wide matrix
+score_wide <- dcast(score_long, neo_id ~ sample,
+                    value.var = "score_average",
+                    fun.aggregate = max, fill = NA_real_)
+
+# Merge metadata back
+neo_matrix <- merge(top_neo[, .(neo_id, peptide, junc.id, hla_allele, score_average,
+                                  mhcflurry_affinity_percentile, mhcflurry_binding_affinity,
+                                  mhcflurry_presentation_score, type, fs, shared)],
+                    score_wide, by = "neo_id", all.x = TRUE)
+setDT(neo_matrix)
+
+# Ensure all sample columns present
+missing_samples <- setdiff(sample_names, colnames(neo_matrix))
+if (length(missing_samples) > 0) neo_matrix[, (missing_samples) := NA_real_]
+setcolorder(neo_matrix, c("neo_id","peptide","junc.id","hla_allele","score_average",
+                           "mhcflurry_affinity_percentile","mhcflurry_binding_affinity",
+                           "mhcflurry_presentation_score","type","fs","shared",
+                           intersect(sample_names, colnames(neo_matrix))))
+cat("Score matrix built:", nrow(neo_matrix), "neoantigens x",
+    length(intersect(sample_names, colnames(neo_matrix))), "samples\n")
+
 
 # Add summary statistics
 cat("Adding summary statistics...\n")
 neo_matrix[, samples_with_neo := rowSums(!is.na(.SD)), .SDcols = sample_names]
 neo_matrix[, max_sample_score := do.call(pmax, c(.SD, na.rm = TRUE)), .SDcols = sample_names]
+
 
 # Create sample-focused summary
 sample_summary <- data.table(
@@ -411,53 +746,83 @@ sample_summary <- data.table(
   avg_score = sapply(sample_names, function(s) mean(neo_matrix[[s]], na.rm = TRUE))
 )
 
+
 # Join with patient list for purity
-patient_list <- fread("Patient_List_Post_TumorPurity_Filter_0.60.txt")
+patient_list <- fread(patient_list_file)
 setkey(sample_summary, sample_id)
 setkey(patient_list, sample_id)
 sample_summary <- sample_summary[patient_list, nomatch = 0]
 
-# Create HLA summary
+
+# Create HLA summary (dynamic for all alleles)
 hla_summary <- top_neo[, .(
   count_neoantigens = .N,
   avg_score = mean(score_average),
   max_score = max(score_average),
+  avg_percentile = mean(mhcflurry_affinity_percentile),
+  avg_binding_affinity = mean(mhcflurry_binding_affinity),
+  avg_presentation_score = mean(mhcflurry_presentation_score),
   unique_junctions = uniqueN(junc.id),
   fs_count = sum(fs == "fs"),
   in_frame_count = sum(fs == "in-frame")
 ), by = hla_allele][order(-max_score)]
 
+
+# Create dynamic color palette for HLA summary plot
+if (nrow(hla_summary) <= 12) {
+  hla_summary_colors <- brewer.pal(max(3, nrow(hla_summary)), "Set3")
+} else {
+  hla_summary_colors <- colorRampPalette(brewer.pal(12, "Set3"))(nrow(hla_summary))
+}
+names(hla_summary_colors) <- hla_summary$hla_allele
+
+
 # Write outputs
 cat("Writing output files...\n")
+
 
 # 1. Main neoantigen matrix (wide format)
 fwrite(neo_matrix, paste0("top_neoantigens_matrix_", current_date, ".tsv"), sep = "\t")
 
+
 # 2. Sample summary
 fwrite(sample_summary, paste0("sample_neoantigen_summary_", current_date, ".tsv"), sep = "\t")
 
-# 3. HLA summary  
+
+# 3. HLA summary
 fwrite(hla_summary, paste0("hla_alleles_summary_", current_date, ".tsv"), sep = "\t")
 
+
 # 4. Long format for specific analyses
-neo_long <- melt(neo_matrix, 
-                 id.vars = c("neo_id", "peptide", "junc.id", "hla_allele", "score_average", "type", "fs", "shared"),
-                 variable.name = "sample_id", 
+neo_long <- melt(neo_matrix,
+                 id.vars = c("neo_id", "peptide", "junc.id", "hla_allele", "score_average", 
+                            "mhcflurry_affinity_percentile", "mhcflurry_binding_affinity", "mhcflurry_presentation_score",
+                            "type", "fs", "shared"),
+                 variable.name = "sample_id",
                  value.name = "sample_score",
                  measure.vars = sample_names)
 neo_long <- neo_long[!is.na(sample_score)]
 fwrite(neo_long, paste0("top_neoantigens_long_", current_date, ".tsv"), sep = "\t")
 
-# Create visualization
+
+# Create visualization for HLA summary
 p_top_hla <- ggplot(hla_summary, aes(x = reorder(hla_allele, -max_score), y = max_score, fill = hla_allele)) +
   geom_bar(stat = "identity") +
-  scale_fill_manual(values = hla_colors) +
+  scale_fill_manual(values = hla_summary_colors) +
   theme_bw() +
   labs(x = "HLA Allele", y = "Highest Score", title = "HLA Alleles by Highest Neoantigen Score") +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
 
-ggsave(paste0("figure_top_hla_distribution_", current_date, ".pdf"), width = 8, height = 6)
-ggsave(paste0("figure_top_hla_distribution_", current_date, ".png"), width = 8, height = 6)
+
+pdf(paste0("figure_top_hla_distribution_", current_date, ".pdf"), 
+    width = 12, height = 6)
+print(p_top_hla)
+dev.off()
+
+CairoPNG(paste0("figure_top_hla_distribution_", current_date, ".png"), width = 12, height = 6, units = "in", res = 300)
+print(p_top_hla)
+dev.off()
 
 # Sample-level visualization
 p_sample_neo <- ggplot(sample_summary, aes(x = reorder(sample_id, -total_neoantigens), y = total_neoantigens, fill = purity)) +
@@ -467,14 +832,60 @@ p_sample_neo <- ggplot(sample_summary, aes(x = reorder(sample_id, -total_neoanti
   labs(x = "Sample", y = "Number of Top Neoantigens", title = "Top Neoantigens per Sample") +
   theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 6))
 
-ggsave(paste0("figure_sample_neoantigens_", current_date, ".pdf"), width = 12, height = 6)
-ggsave(paste0("figure_sample_neoantigens_", current_date, ".png"), width = 12, height = 6)
+
+# p_sample_neo
+pdf(paste0("figure_sample_neoantigens_", current_date, ".pdf"), 
+    width = 12, height = 6)
+print(p_sample_neo)
+dev.off()
+
+# Create p_hla_summary plot (add this before the saving code)
+p_hla_summary <- ggplot(hla_summary, aes(x = reorder(hla_allele, -count_neoantigens), 
+                                         y = count_neoantigens, 
+                                         fill = hla_allele)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = count_neoantigens), vjust = -0.5, size = 3) +
+  scale_fill_manual(values = hla_summary_colors) +
+  theme_bw() +
+  labs(x = "HLA Allele", y = "Number of Top Neoantigens", 
+       title = "HLA Alleles by Number of Top Neoantigens") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+
+# Then save it
+pdf(paste0("figure_hla_summary_", current_date, ".pdf"), 
+    width = 12, height = 6)
+print(p_hla_summary)
+dev.off()
+
+# Also save as PNG if you want
+CairoPNG(paste0("figure_hla_summary_", current_date, ".png"), 
+         width = 12, height = 6, units = "in", res = 300)
+print(p_hla_summary)
+dev.off()
+
+
+# Additional: Create a summary table of all HLA alleles found
+hla_overview <- data.table(
+  HLA_Allele = hla_alleles_all,
+  Total_Neoantigens = sapply(hla_alleles_all, function(x) sum(df_all_map$hla_allele == x)),
+  Top_10pct_Neoantigens = sapply(hla_alleles_all, function(x) sum(df_na_nj_map$hla_allele == x)),
+  Mean_Score = sapply(hla_alleles_all, function(x) mean(df_all_map[hla_allele == x, score_average]))
+)[order(-Total_Neoantigens)]
+
+fwrite(hla_overview, paste0("hla_alleles_overview_", current_date, ".tsv"), sep = "\t")
+
+cat("HLA alleles overview:\n")
+print(hla_overview)
+
 
 cat("Step 5 completed successfully!\n")
 cat("Generated files:\n")
 cat("1. top_neoantigens_matrix_", current_date, ".tsv - Main matrix format\n")
-cat("2. sample_neoantigen_summary_", current_date, ".tsv - Sample-level summary\n")  
+cat("2. sample_neoantigen_summary_", current_date, ".tsv - Sample-level summary\n")
 cat("3. hla_alleles_summary_", current_date, ".tsv - HLA-level summary\n")
 cat("4. top_neoantigens_long_", current_date, ".tsv - Long format for analysis\n")
+cat("5. hla_alleles_overview_", current_date, ".tsv - HLA alleles overview\n")
+
 
 print("All tasks completed successfully.")
