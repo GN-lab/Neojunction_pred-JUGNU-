@@ -1,14 +1,10 @@
-# Neojunction_prediction
+# JUGNU (Junction Guided Neoantigen Uncoverer)
 
-Neojunction prediction from 307 transcriptomic dataset acquired from Hartwig (Breast sample)
+[Uploading JUGNU_Pipeline.pdf…]()
 
 ______________________________________________________________________________________________________
 Phase 1: Neojunction detection pipeline 
 ______________________________________________________________________________________________________
-
-<img width="4170" height="7770" alt="neojunction_flowchart_clean" src="https://github.com/user-attachments/assets/5ab05221-1258-40fa-bcc4-8da275d0d7f4" />
-
-***This flowchart explains the process in detail:
 
 1. Select high-purity tumors: Apply a tumor purity threshold of ≥0.60 to obtain 40 high-purity tumors, which are used for all downstream counts and PSR calculations. (Positive Sample Rate (PSR): fraction of tumor samples with a given junction supported by ≥10 reads; for 40 samples, PSR = number of positive samples ÷ 40 (threshold used: PSR ≥0.1 for recurrence).
 2. Extract normal spliced junctions: Extract those spliced junctions which are considered as normal through the GTF file (150k+ transcripts, 20k gene).
@@ -25,20 +21,12 @@ ________________________________________________________________________________
 Phase 2: Sequence Processing Pipeline
 ______________________________________________________________________________________________________
 
-<img width="3840" height="2760" alt="phase2_flowchart" src="https://github.com/user-attachments/assets/abef3a8b-758e-4231-afbe-dca1c4b94b68" />
-
-***This flowchart explains the process in detail:
-
 11. Translate neojunctions into altered amino acid sequences: For each retained neojunction from Phase 1, translate the aberrant spliced transcripts into amino acid (AA) sequences using a three-frame translation approach (forward, +1, and +2 frames) to account for potential novel open reading frames (ORFs); this captures all possible protein-level alterations arising from the non-canonical splicing events (yielding 2,237 altered AA sequences from 1,513 neojunctions across 666 unique genes). Translation begins at the first in-frame start codon downstream of the junction or the junction itself if no codon is available, ensuring comprehensive coverage of potential neoantigens while discarding frames without viable ORFs.
 12. Extract candidate peptides (N-mers) from altered sequences: Apply a sliding window to generate all possible 8- to 11-mer peptides from the translated AA sequences, as these lengths are optimal for binding to HLA class I molecules (major histocompatibility complex class I proteins on cell surfaces that present intracellular peptides to T cells); focus on peptides spanning the neojunction to maximize immunogenicity (producing 580,455 peptides, of which 79,114 are unique), with each peptide tagged to its originating neojunction, gene, and flanking residues for subsequent HLA binding predictions. This step prioritizes HLA class I-restricted epitopes, which are crucial for cytotoxic T-cell recognition in cancer immunotherapy.
 
 ______________________________________________________________________________________________________
 Phase 3: Neoantigen Prediction Pipeline
 ______________________________________________________________________________________________________
-
-<img width="3840" height="3300" alt="phase3_flowchart" src="https://github.com/user-attachments/assets/b446eb8c-a7f6-41fc-8f52-106f94ef81e8" />
-
-***This flowchart explains the process in detail:
 
 13. Prepare input for MHCflurry binding predictions: Construct a comprehensive input DataFrame by combining the generated 8-11mer peptides with their 3-residue N-terminal and C-terminal flanks (contextual sequences that influence MHC processing and presentation) and the patient's HLA alleles (human leukocyte antigen types, polymorphic proteins that dictate peptide presentation; here, using up to 5 alleles per patient based on prior selection criteria); this results in 580,455 rows ready for batch prediction, ensuring each peptide is evaluated against the individual's HLA repertoire to identify personalized neoantigens (79,114 unique peptides prepared). The flanks are essential as MHCflurry's model incorporates proteasomal cleavage and TAP transport signals for realistic immunogenicity scoring.
 14. Run MHCflurry for affinity, processing, and presentation predictions: Execute the MHCflurry algorithm—a machine learning tool trained on mass spectrometry and binding assay data—to predict each peptide-HLA pair's binding affinity (IC50 value in nanomolar, where <500 nM indicates strong binders), proteasomal processing efficiency (cleavage likelihood at flanks), and overall presentation score (composite metric integrating binding, processing, and stability); process across all patient HLAs in parallel (yielding 342,344 total predictions for the cohort, covering 79,114 unique peptides against 5 common alleles). MHCflurry outperforms traditional netMHC tools by leveraging pan-allele models, providing robust scores for rare HLAs and reducing false positives in neoantigen discovery.
@@ -84,17 +72,7 @@ Specifies the minimum allowed intron length (20 bases) for splice junctions. Ver
 --alignIntronMax 1000000
 Sets the maximum allowed intron length (1,000,000 bases). This limits extremely long introns that could be biologically implausible or mapping artifacts.
 
-______________________________________________________________________________________________________
-Results :-
-______________________________________________________________________________________________________
 
-<img width="2400" height="1800" alt="figure_5i_fs_if_boxplot_20250928" src="https://github.com/user-attachments/assets/afada8f3-e0b4-4ad9-8843-6276ad1510eb" />
-
-<img width="3000" height="1800" alt="figure_5i_splice_types_jitter_20250928" src="https://github.com/user-attachments/assets/cdb3c880-395a-4753-9251-12ddf68b5f1f" />
-
-<img width="2400" height="1500" alt="figure_5i_fs_if_density_all_20250928" src="https://github.com/user-attachments/assets/1b15fbf6-babc-4fb4-bcd7-caaca6ac60d3" />
-
-<img width="2400" height="3000" alt="figure_5i_splice_types_density_all_20250928" src="https://github.com/user-attachments/assets/73be694c-fd42-4bdf-89d6-a7c3983c3f9f" />
 
 <img width="2400" height="1800" alt="figure_5i_fs_if_jitter_20250928" src="https://github.com/user-attachments/assets/40a758b0-f2d4-464c-b5f4-51e530a5b98b" />
 
