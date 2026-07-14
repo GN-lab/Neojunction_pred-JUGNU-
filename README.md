@@ -75,7 +75,7 @@ High-confidence peptide-HLA pairs are prioritised as candidate neoantigens.
 Required inputs:
 
 ```text
-sample.txt
+samples.txt
 FASTQ files
 Reference genome
 GTF annotation
