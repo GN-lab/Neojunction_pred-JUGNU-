@@ -121,10 +121,27 @@ R >= 4.3
 Splice junction discovery is performed using STAR with the following settings:
 
 ```bash
---outSJfilterOverhangMin 15 20 20 20
---alignSJoverhangMin 8
---alignIntronMin 20
---alignIntronMax 1000000
+--star_align_args "--outSAMtype BAM Unsorted \
+                     --twopassMode Basic \
+                     --outFilterMultimapScoreRange 1 \
+                     --outFilterMultimapNmax 20 \
+                     --outFilterMismatchNmax 10 \
+                     --alignIntronMax 500000 \
+                     --alignMatesGapMax 1000000 \
+                     --sjdbScore 2 \
+                     --alignSJDBoverhangMin 1 \
+                     --genomeLoad NoSharedMemory \
+                     --limitBAMsortRAM 80000000000 \
+                     --readFilesCommand gunzip -c \
+                     --outFilterMatchNminOverLread 0.33 \
+                     --outFilterScoreMinOverLread 0.33 \
+                     --sjdbOverhang 100 \
+                     --outSAMstrandField intronMotif \
+                     --outSAMattributes NH HI NM MD AS XS \
+                     --limitSjdbInsertNsj 2000000 \
+                     --outSAMunmapped Within \
+                     --outSAMheaderHD @HD VN:1.4 \
+                     --outSAMmultNmax 1" \
 ```
 
 These parameters increase splice-junction confidence by enforcing minimum read support and biologically plausible intron lengths.
