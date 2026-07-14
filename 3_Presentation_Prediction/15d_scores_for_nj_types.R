@@ -122,7 +122,7 @@ if (file.exists(CACHE_ALL_MAP)) {
   }
 
   # 2. Bed files -- written now while we have the data, before anything else.
-  #    Format: ENST_ID / AA_START / AA_END / PEPTIDE / HLA_ALLELES / N_ALLELES
+  #    Format: ENST_ID / AA_START / AA_END / PEPTIDE / HLA_ALLELES
   #    Source: raw 14b predictions filtered at <=500nM -- NOT 14c top files.
   #    14c keeps only ONE best allele per peptide. Raw 14b has ALL alleles.
   #    A peptide like RVHYKGTGR can bind 11 alleles at <=500nM -- we want
@@ -144,8 +144,7 @@ if (file.exists(CACHE_ALL_MAP)) {
                     all.x = TRUE, allow.cartesian = TRUE)
     # Collapse all qualifying alleles per (transcript, position, peptide)
     bed <- joined[!is.na(enst.model), .(
-      HLA_ALLELES = paste(sort(unique(allele)), collapse = ","),
-      N_ALLELES   = uniqueN(allele)
+      HLA_ALLELES = paste(sort(unique(allele)), collapse = ",")
     ), by = .(ENST_ID  = enst.model,
               AA_START = aa_start,
               AA_END   = aa_end,
@@ -154,7 +153,8 @@ if (file.exists(CACHE_ALL_MAP)) {
     cat(label, "bed:", nrow(bed), "rows |",
         uniqueN(bed$PEPTIDE), "unique peptides |",
         uniqueN(bed$ENST_ID), "transcripts |",
-        round(mean(bed$N_ALLELES), 2), "alleles/peptide avg\n")
+        round(mean(bed[, uniqueN(strsplit(HLA_ALLELES,",")[[1]])]), 2),
+        "alleles/peptide avg\n")
     bed
   }
 
@@ -235,19 +235,6 @@ if (file.exists(CACHE_ALL_MAP)) {
   ###########################################################################
 
   # Load MHCflurry input files as data.table and deduplicate
-  input_patterns <- c("^08mer_mhcflurry_input_.*\\.csv$",
-                      "^09mer_mhcflurry_input_.*\\.csv$",
-                      "^10mer_mhcflurry_input_.*\\.csv$",
-                      "^11mer_mhcflurry_input_.*\\.csv$")
-  input_files <- lapply(input_patterns, latest_file)
-  cat("Input files:\n", paste(input_files, collapse="\n"), "\n")
-  df_input <- rbindlist(lapply(input_files, fread), use.names = TRUE, fill = TRUE)
-  df_input <- unique(df_input, by = c("peptide", "allele"))
-  
-  # Join with inputs
-  setkey(df_all_map, peptide, allele)
-  setkey(df_input, peptide, allele)
-  df_all_map <- df_all_map[df_input, nomatch = NA]
   
   # Fast junction mapping via coordinate map (replaces slow substring match)
   mapping_file <- latest_file("^.*complete_list_all_mers\\.tsv$")
@@ -257,11 +244,12 @@ if (file.exists(CACHE_ALL_MAP)) {
   if ("junc.id" %in% names(df_all_map)) {
     # Already have junc.id from coordinate map -- just look up type and fs
     map_lookup <- unique(df_mapping[, .(
-      junc.id,
-      type,
-      fs = fifelse(grepl("shift|fs", aa.change) | (ln.diff %% 3 != 0), "fs", "in-frame")
-    )])
-    df_all_map <- merge(df_all_map, map_lookup, by = "junc.id", all.x = TRUE)
+        junc.id,
+        type,
+        fs = fifelse(grepl("shift|fs", aa.change) | (ln.diff %% 3 != 0), "fs", "in-frame")
+      )])
+      map_lookup <- map_lookup[, .SD[1], by = junc.id]
+      df_all_map <- merge(df_all_map, map_lookup, by = "junc.id", all.x = TRUE)
     cat("Junction type/fs mapped via junc.id join\n")
   } else {
     # Build junc.id lookup from coordinate map first
@@ -286,6 +274,7 @@ if (file.exists(CACHE_ALL_MAP)) {
         type,
         fs = fifelse(grepl("shift|fs", aa.change) | (ln.diff %% 3 != 0), "fs", "in-frame")
       )])
+      map_lookup <- map_lookup[, .SD[1], by = junc.id]
       df_all_map <- merge(df_all_map, map_lookup, by = "junc.id", all.x = TRUE)
       cat("Attached junc.id to", sum(!is.na(df_all_map$junc.id)),
           "of", nrow(df_all_map), "rows via coordinate map\n")
