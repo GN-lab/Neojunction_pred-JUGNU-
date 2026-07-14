@@ -163,7 +163,7 @@ JUGNU can be applied to:
 
 ## Contact
 
-Gaurav Nagar (Gaurav.nagar@icr.ac.uk)
+Gaurav Nagar 
 
 Institute of Cancer Research (ICR), London
 
