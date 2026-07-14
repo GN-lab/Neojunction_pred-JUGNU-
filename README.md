@@ -108,7 +108,7 @@ Sample-level neoantigen matrices
 Nextflow
 STAR
 Salmon
-IRFinder
+IRFinder-S
 Python >= 3.10
 MHCFlurry 2.0
 R >= 4.3
