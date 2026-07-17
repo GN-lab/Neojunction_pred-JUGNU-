@@ -23,7 +23,7 @@ RNA-seq reads are processed using STAR and IRFinder.
 Two complementary event types are detected:
 
 - Novel splice junctions (SJ.out.tab)
-- Intron retention events (IRFinder)
+- Intron retention events (IRFinder-S)
 
 Candidate events are filtered against:
 
