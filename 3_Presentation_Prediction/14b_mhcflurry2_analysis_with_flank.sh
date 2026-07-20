@@ -22,21 +22,6 @@ set -euo pipefail
 #    2. Presentation - integrates processing predictions with binding affinity predictions to 
 #       give a composite "presentation score".
 
-# Use the main dir for all conda/mamba caches and configs
-export HOME="/data/rds/DMP/UCEC/EVOLIMMU/graichand/fake_home"
-export CONDA_PKGS_DIRS="/data/rds/DMP/UCEC/EVOLIMMU/graichand/.conda_cache"
-export CONDA_ENVS_DIRS="/data/rds/DMP/UCEC/EVOLIMMU/graichand/.conda_envs"
-export CONDARC="/data/rds/DMP/UCEC/EVOLIMMU/graichand/.condarc"
-export CONDA_CONFIG_DIR="/data/rds/DMP/UCEC/EVOLIMMU/graichand/.conda_config"
-export TMPDIR="/data/rds/DMP/UCEC/EVOLIMMU/graichand/tmp"
-
-mkdir -p "$HOME" "$CONDA_PKGS_DIRS" "$CONDA_ENVS_DIRS" "$CONDA_CONFIG_DIR" "$TMPDIR"
-
-source "/data/scratch/DMP/UCEC/EVOLIMMU/csalas/miniconda3/etc/profile.d/conda.sh"
-
-module load Mamba/23.1.0-0
-module load CUDA/12.1.1  # Matches your available module; bridges with Conda cudatoolkit=11.7.0
-
 ################################################################
 # 0. (DISABLED) Install MHCFlurry environment and models
 #    Kept for future re-install; currently commented via here-doc

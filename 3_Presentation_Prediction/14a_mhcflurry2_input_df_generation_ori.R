@@ -36,13 +36,13 @@ nmers_11_file <- "2023_0812_hlathenalist_msic_11mers.tsv"
 samples_file <- file.path(input_dir, "samples.txt")  # Adjust if samples.txt is elsewhere
 
 # Hardcode run date for outputs
-run_date <- "2026_1124"
+run_date <- "2025_1124"
 
 # Load Samples List
 user_samples <- fread(
   samples_file,
   header   = FALSE,
-  col.names = "sample_id",
+  col.names = "sample",
   fill     = TRUE,
   na.strings = c("", "NA")
 )$sample
@@ -227,20 +227,6 @@ for (i in 1:4) {
     setnames(nmer_all, "peptide.1", "peptide")
   }
 
-  # Filter out peptides with non-standard amino acids (NEW) -- MHCflurry's
-  # models were only trained on the 20 standard amino acids and will crash
-  # the ENTIRE run (no partial output saved) if even one peptide contains
-  # a non-standard letter. The most common real case is "U" (selenocysteine,
-  # a genuine 21st amino acid used by a small class of real human genes) --
-  # not a bug in the sequence, just something MHCflurry structurally can't
-  # score. Others (X, B, Z, J) mean an ambiguous/unresolved residue.
-  n_before <- nrow(nmer_all)
-  nmer_all <- nmer_all[!grepl("[^ACDEFGHIKLMNPQRSTVWY]", peptide)]
-  n_removed <- n_before - nrow(nmer_all)
-  if (n_removed > 0) {
-    cat("  Removed", n_removed, "peptide(s) with non-standard amino acids (e.g. selenocysteine) -- MHCflurry cannot score these.\n")
-  }
-
   assign(paste0(nmer_lengths[i], "mer_final"), nmer_all)
   cat("Processed", nmer_lengths[i], "mers:", nrow(nmer_all), "rows (peptides × alleles).\n")
 }
@@ -266,90 +252,3 @@ fwrite(get("11mer_final"),
        sep = ",", na = "NA", col.names = TRUE, quote = TRUE)
 
 print("Step 14a: MHCflurry input CSVs generated with alleles extracted from OptiType results per sample.")
-
-###########################################################################
-#  WT SIDE (NEW): Generate MHCflurry input CSVs from WT/self n-mers -------
-###########################################################################
-# Purpose: Build the same peptide x allele expansion, but for the WT-derived
-# n-mers written by Step 12 (Step 7, *_mers_wt.tsv). Running these through
-# MHCflurry (Step 14b, WT side) gives the "self/WT antigen" predictions that
-# Step 15e uses to remove any ALT neoantigen (peptide + allele) that also
-# arises from the WT sequence, so it isn't miscounted as tumour-specific.
-
-nmers_08_wt_file <- "2023_0812_hlathenalist_msic_08mers_wt.tsv"
-nmers_09_wt_file <- "2023_0812_hlathenalist_msic_09mers_wt.tsv"
-nmers_10_wt_file <- "2023_0812_hlathenalist_msic_10mers_wt.tsv"
-nmers_11_wt_file <- "2023_0812_hlathenalist_msic_11mers_wt.tsv"
-
-setwd(directory_12)
-nmers_08_wt <- fread(nmers_08_wt_file, na.strings = c("", "NA"))
-nmers_09_wt <- fread(nmers_09_wt_file, na.strings = c("", "NA"))
-nmers_10_wt <- fread(nmers_10_wt_file, na.strings = c("", "NA"))
-nmers_11_wt <- fread(nmers_11_wt_file, na.strings = c("", "NA"))
-
-if ("TPM" %in% colnames(nmers_08_wt)) nmers_08_wt[, TPM := NULL]
-if ("TPM" %in% colnames(nmers_09_wt)) nmers_09_wt[, TPM := NULL]
-if ("TPM" %in% colnames(nmers_10_wt)) nmers_10_wt[, TPM := NULL]
-if ("TPM" %in% colnames(nmers_11_wt)) nmers_11_wt[, TPM := NULL]
-
-setnames(nmers_08_wt, old = colnames(nmers_08_wt), new = c("peptide", "n_flank", "c_flank"))
-setnames(nmers_09_wt, old = colnames(nmers_09_wt), new = c("peptide", "n_flank", "c_flank"))
-setnames(nmers_10_wt, old = colnames(nmers_10_wt), new = c("peptide", "n_flank", "c_flank"))
-setnames(nmers_11_wt, old = colnames(nmers_11_wt), new = c("peptide", "n_flank", "c_flank"))
-
-nmers_08_wt[, `:=`(n_flank = gsub("-", "", as.character(n_flank)), c_flank = gsub("-", "", as.character(c_flank)))]
-nmers_09_wt[, `:=`(n_flank = gsub("-", "", as.character(n_flank)), c_flank = gsub("-", "", as.character(c_flank)))]
-nmers_10_wt[, `:=`(n_flank = gsub("-", "", as.character(n_flank)), c_flank = gsub("-", "", as.character(c_flank)))]
-nmers_11_wt[, `:=`(n_flank = gsub("-", "", as.character(n_flank)), c_flank = gsub("-", "", as.character(c_flank)))]
-
-nmer_wt_dfs <- list(nmers_08_wt, nmers_09_wt, nmers_10_wt, nmers_11_wt)
-
-for (i in 1:4) {
-  nmer_i <- nmer_wt_dfs[[i]]
-  if (nrow(nmer_i) == 0 || nrow(alleles_dt) == 0) {
-    cat("Skipping WT", nmer_lengths[i], "mers: empty data.\n")
-    next
-  }
-
-  nmer_expanded    <- nmer_i[rep(1:.N, times = nrow(alleles_dt))]
-  alleles_repeated <- alleles_dt[rep(1:.N, each = nrow(nmer_i))]
-  nmer_all_wt      <- cbind(alleles_repeated, nmer_expanded)
-
-  if ("peptide.1" %in% names(nmer_all_wt)) {
-    setnames(nmer_all_wt, "peptide.1", "peptide")
-  }
-
-  # Same filter as the ALT side (NEW) -- WT peptides derived from
-  # selenoprotein genes will also contain "U" and would crash MHCflurry
-  # the same way.
-  n_before_wt <- nrow(nmer_all_wt)
-  nmer_all_wt <- nmer_all_wt[!grepl("[^ACDEFGHIKLMNPQRSTVWY]", peptide)]
-  n_removed_wt <- n_before_wt - nrow(nmer_all_wt)
-  if (n_removed_wt > 0) {
-    cat("  Removed", n_removed_wt, "WT peptide(s) with non-standard amino acids.\n")
-  }
-
-  assign(paste0(nmer_lengths[i], "mer_final_wt"), nmer_all_wt)
-  cat("Processed WT", nmer_lengths[i], "mers:", nrow(nmer_all_wt), "rows (peptides x alleles).\n")
-}
-
-setwd(directory_14)
-suffix_wt <- paste0("wt_", run_date, ".csv")
-
-fwrite(get("8mer_final_wt"),
-       paste0("08mer_mhcflurry_input_", suffix_wt),
-       sep = ",", na = "NA", col.names = TRUE, quote = TRUE)
-
-fwrite(get("9mer_final_wt"),
-       paste0("09mer_mhcflurry_input_", suffix_wt),
-       sep = ",", na = "NA", col.names = TRUE, quote = TRUE)
-
-fwrite(get("10mer_final_wt"),
-       paste0("10mer_mhcflurry_input_", suffix_wt),
-       sep = ",", na = "NA", col.names = TRUE, quote = TRUE)
-
-fwrite(get("11mer_final_wt"),
-       paste0("11mer_mhcflurry_input_", suffix_wt),
-       sep = ",", na = "NA", col.names = TRUE, quote = TRUE)
-
-print("Step 14a (WT side): MHCflurry input CSVs generated for WT/self peptides, same alleles as ALT side.")
