@@ -24,7 +24,7 @@ WORKDIR="$(pwd)"
 # Rather than hardcoding a filename here (which breaks the moment you
 # rename/move this file, as just happened), MASTER_SCRIPT_PATH is read from
 # config.sh -- set it there once, e.g.:
-#   export MASTER_SCRIPT_PATH="/data/JUGNU/master.sh"
+#   export MASTER_SCRIPT_PATH="/data/rds/DMP/UCEC/EVOLIMMU/graichand/Neojuction_pred/SSNIP/master.sh"
 # and you never need to touch this file again if you rename/move it.
 if [[ -z "${MASTER_SCRIPT_PATH:-}" ]]; then
   # config.sh may not be sourced yet this early -- source it now just to
@@ -439,19 +439,105 @@ fi
 
 ########################################################################
 # ============================ PHASE 2 ================================
-#   Neopeptide Prediction + Presentation Prediction (steps 11-15e)
+#   Neopeptide Prediction + Presentation Prediction (steps 11-15d)
 ########################################################################
 
+# ---------------------------------------------------------------------
+# Step 11: AA sequence prediction
+# ---------------------------------------------------------------------
 if ! step_done "11_aaseq_prediction"; then
-  jobPrev=$(submit_job "11_aaseq_prediction" "Rscript ${NEOPEPTIDE_DIR}/11_aaseq_prediction.R" "$jobPrev" \
+  jobPrev=$(submit_job "11_aaseq_prediction" \
+    "Rscript ${NEOPEPTIDE_DIR}/11_aaseq_prediction.R" "$jobPrev" \
     "${STEP11_OUTPUT_DIR:-SKIP}" 'Res_AA_Prediction_Confirmed_[0-9]{8}\.tsv')
 else echo "11_aaseq_prediction already done."; fi
 
+# ---------------------------------------------------------------------
+# Step 12: N-mer generation
+# ---------------------------------------------------------------------
 if ! step_done "12_nmer_generation"; then
-  jobPrev=$(submit_job "12_nmer_generation" "Rscript ${NEOPEPTIDE_DIR}/12_nmer_generation.R" "$jobPrev" \
+  jobPrev=$(submit_job "12_nmer_generation" \
+    "Rscript ${NEOPEPTIDE_DIR}/12_nmer_generation.R" "$jobPrev" \
     "${OUTPUT_DIR:-SKIP}" '2023_0812_complete_list_all_mers\.tsv')
 else echo "12_nmer_generation already done."; fi
 
+# ---------------------------------------------------------------------
+# Step 13a: NetMHCpan 4.2 predictions (ALT + WT, 8-11mers)
+# Resources: compute, 24 CPUs, 8042MB/cpu (~192G), 3 days
+# Outputs:   netmhcpan_08mer_YYYY_MMDD.tsv  (and 09/10/11mer equivalents)
+#            netmhcpan_08mer_wt_YYYY_MMDD.tsv (and 09/10/11mer equivalents)
+# ---------------------------------------------------------------------
+if ! step_done "13a_NetMHCPan_analysis"; then
+  echo "[INFO] Step 13a: NetMHCpan -- installs on first run, skips if already installed..."
+  BODY_13A="bash ${PRESENTATION_DIR}/13a_NetMHCPan_analysis.sh
+bash \"${SCRIPT_PATH}\" __validate_step__ 13a_NetMHCPan_analysis \"${OUTPUT_DIR:-SKIP}\" 'netmhcpan_08mer_[0-9_]+\.tsv' 2
+touch ${WORKDIR}/.checkpoints/13a_NetMHCPan_analysis.done"
+  SCRIPT_13A=$(write_job_script "13a_NetMHCPan_analysis" "$BODY_13A")
+  JOB_13A=$(sbatch --parsable --job-name="13a_NetMHCPan_analysis" \
+    --partition=compute --cpus-per-task=24 --mem-per-cpu=8042 --time=3-00:00:00 \
+    --output=logs/13a_NetMHCPan_analysis_%j.log \
+    ${jobPrev:+--dependency=afterok:${jobPrev}} \
+    "$SCRIPT_13A")
+  echo "Submitted 13a_NetMHCPan_analysis as $JOB_13A (partition=compute, cpus=24, 3 days, script: $SCRIPT_13A)"
+  jobPrev="$JOB_13A"
+else
+  echo "13a_NetMHCPan_analysis already done."
+fi
+
+# ---------------------------------------------------------------------
+# Step 13b: Select top allele per peptide from NetMHCpan SB candidates
+# Resources: compute, 8 CPUs, 8042MB/cpu (~64G), 2 hours
+#   - Loads all 4 n-mer lengths (ALT + WT)
+#   - Filters to binder == "<= SB", picks lowest EL rank per peptide
+# Outputs:   netmhcpan_08mer_selected_alleles_YYYYMMDD.tsv  (+ 09/10/11)
+#            netmhcpan_08mer_wt_selected_alleles_YYYYMMDD.tsv (+ 09/10/11)
+# ---------------------------------------------------------------------
+if ! step_done "13b_select_top_alleles"; then
+  echo "[INFO] Step 13b: Selecting top NetMHCpan alleles per peptide (SB only)..."
+  BODY_13B="Rscript ${PRESENTATION_DIR}/13b_select_top_alleles.R
+bash \"${SCRIPT_PATH}\" __validate_step__ 13b_select_top_alleles \"${STEP13_OUTPUT_DIR:-SKIP}\" 'netmhcpan_09mer_selected_alleles_[0-9]{8}\.tsv' 2
+touch ${WORKDIR}/.checkpoints/13b_select_top_alleles.done"
+  SCRIPT_13B=$(write_job_script "13b_select_top_alleles" "$BODY_13B")
+  JOB_13B=$(sbatch --parsable --job-name="13b_select_top_alleles" \
+    --partition=compute --cpus-per-task=8 --mem-per-cpu=8042 --time=2:00:00 \
+    --output=logs/13b_select_top_alleles_%j.log \
+    ${jobPrev:+--dependency=afterok:${jobPrev}} \
+    "$SCRIPT_13B")
+  echo "Submitted 13b_select_top_alleles as $JOB_13B (cpus=8, ~64G, 2h, script: $SCRIPT_13B)"
+  jobPrev="$JOB_13B"
+else
+  echo "13b_select_top_alleles already done."
+fi
+
+# ---------------------------------------------------------------------
+# Step 13c: Generate NetMHCpan prediction figures
+# Resources: compute, 4 CPUs, 8042MB/cpu (~32G), 1 hour
+#   - Histograms and pie charts from 13b selected-allele files
+#   - All 4 n-mer lengths, full distribution + top 10 percentile
+# Outputs:   PDFs in STEP13_FIGURES_DIR
+# ---------------------------------------------------------------------
+if ! step_done "13c_generate_figures"; then
+  echo "[INFO] Step 13c: Generating NetMHCpan prediction figures..."
+  BODY_13C="Rscript ${PRESENTATION_DIR}/13c_generate_figures.R
+bash \"${SCRIPT_PATH}\" __validate_step__ 13c_generate_figures \"${OUTPUT_DIR}/figures/step13\" 'histogram_all_09mer_n[0-9]+_[0-9]{8}\.pdf' 2
+touch ${WORKDIR}/.checkpoints/13c_generate_figures.done"
+  SCRIPT_13C=$(write_job_script "13c_generate_figures" "$BODY_13C")
+  JOB_13C=$(sbatch --parsable --job-name="13c_generate_figures" \
+    --partition=compute --cpus-per-task=4 --mem-per-cpu=8042 --time=1:00:00 \
+    --output=logs/13c_generate_figures_%j.log \
+    ${jobPrev:+--dependency=afterok:${jobPrev}} \
+    "$SCRIPT_13C")
+  echo "Submitted 13c_generate_figures as $JOB_13C (cpus=4, ~32G, 1h, script: $SCRIPT_13C)"
+  jobPrev="$JOB_13C"
+else
+  echo "13c_generate_figures already done."
+fi
+
+# ---------------------------------------------------------------------
+# Step 14a: MHCflurry input dataframe generation
+# Resources: compute, 24 CPUs, 8042MB/cpu (~192G), 12 hours
+#   - WT tables are ~196 million rows each -- high memory required
+# Outputs:   08mer_mhcflurry_input_wt_YYYY_MMDD.csv (+ 09/10/11)
+# ---------------------------------------------------------------------
 if ! step_done "14a_mhcflurry2_input_df_generation"; then
   echo "[INFO] Step 14a: Submitting with higher memory (WT tables are ~196 million rows each)..."
   BODY_14A="Rscript ${PRESENTATION_DIR}/14a_mhcflurry2_input_df_generation.R
@@ -463,12 +549,18 @@ touch ${WORKDIR}/.checkpoints/14a_mhcflurry2_input_df_generation.done"
     --output=logs/14a_mhcflurry2_input_df_generation_%j.log \
     ${jobPrev:+--dependency=afterok:${jobPrev}} \
     "$SCRIPT_14A")
-  echo "Submitted 14a_mhcflurry2_input_df_generation as $JOB_14A (cpus=24, ~64G total, script: $SCRIPT_14A)"
+  echo "Submitted 14a_mhcflurry2_input_df_generation as $JOB_14A (cpus=24, ~192G, 12h, script: $SCRIPT_14A)"
   jobPrev="$JOB_14A"
 else
   echo "14a_mhcflurry2_input_df_generation already done."
 fi
 
+# ---------------------------------------------------------------------
+# Step 14b: MHCflurry 2.0 predictions with flanks (GPU)
+# Resources: gpu, 1 GPU, 6 CPUs, 90G, 7 days
+#   - WT files are 17-18GB each -- high memory + GPU required
+# Outputs:   YYYYMMDD_08mers_flank_mhcflurry.csv (+ 09/10/11, ALT+WT)
+# ---------------------------------------------------------------------
 if ! step_done "14b_mhcflurry2_analysis_with_flank"; then
   echo "[INFO] Step 14b: Submitting to GPU partition with high memory (WT files are 17-18GB each)..."
   BODY_14B="bash ${PRESENTATION_DIR}/14b_mhcflurry2_analysis_with_flank.sh
@@ -480,12 +572,18 @@ touch ${WORKDIR}/.checkpoints/14b_mhcflurry2_analysis_with_flank.done"
     --output=logs/14b_mhcflurry2_analysis_with_flank_%j.log \
     ${jobPrev:+--dependency=afterok:${jobPrev}} \
     "$SCRIPT_14B")
-  echo "Submitted 14b_mhcflurry2_analysis_with_flank as $JOB_14B (partition=gpu, 6 cpus/90G, single-GPU share -- script: $SCRIPT_14B)"
+  echo "Submitted 14b_mhcflurry2_analysis_with_flank as $JOB_14B (partition=gpu, 6 cpus/90G, single-GPU, 7 days, script: $SCRIPT_14B)"
   jobPrev="$JOB_14B"
 else
   echo "14b_mhcflurry2_analysis_with_flank already done."
 fi
 
+# ---------------------------------------------------------------------
+# Step 14c: Select top MHCflurry alleles
+# Resources: compute, 24 CPUs, 8042MB/cpu (~192G), 2 days
+#   - Also loads WT files (17-18GB each), processes one at a time
+# Outputs:   mhcflurry_08mer_top_YYYYMMDD.tsv (+ 09/10/11)
+# ---------------------------------------------------------------------
 if ! step_done "14c_select_top_alleles"; then
   echo "[INFO] Step 14c: Submitting with high memory (now also loads WT files, 17-18GB each)..."
   BODY_14C="Rscript ${PRESENTATION_DIR}/14c_select_top_alleles.R
@@ -497,37 +595,165 @@ touch ${WORKDIR}/.checkpoints/14c_select_top_alleles.done"
     --output=logs/14c_select_top_alleles_%j.log \
     ${jobPrev:+--dependency=afterok:${jobPrev}} \
     "$SCRIPT_14C")
-  echo "Submitted 14c_select_top_alleles as $JOB_14C (cpus=24, ~8042MB/cpu = ~64G total -- 14c now processes WT files one at a time, so peak memory is much lower than before, script: $SCRIPT_14C)"
+  echo "Submitted 14c_select_top_alleles as $JOB_14C (cpus=24, ~192G, 2 days, script: $SCRIPT_14C)"
   jobPrev="$JOB_14C"
 else
   echo "14c_select_top_alleles already done."
 fi
 
+# ---------------------------------------------------------------------
+# Step 14d: Generate MHCflurry figures
+# Resources: compute, 4 CPUs, 8042MB/cpu (~32G), 1 hour
+# ---------------------------------------------------------------------
 if ! step_done "14d_generate_figures"; then
-  jobPrev=$(submit_job "14d_generate_figures" "Rscript ${PRESENTATION_DIR}/14d_generate_figures.R" "$jobPrev")
+  jobPrev=$(submit_job "14d_generate_figures" \
+    "Rscript ${PRESENTATION_DIR}/14d_generate_figures.R" "$jobPrev")
 else echo "14d_generate_figures already done."; fi
 
+# =====================================================================
+# Steps 15a-15d: Cross-analysis (NetMHCpan x MHCflurry) -- Concordance
+# NOTE: 13a + 14b must BOTH be complete before 15a can run.
+#   13a raw TSVs  -> 15a (NetMHCpan all binding levels)
+#   14b raw CSVs  -> 15a (MHCflurry full prediction universe)
+# =====================================================================
+
+# ---------------------------------------------------------------------
+# Step 15a: Concordance cross-analysis (NetMHCpan + MHCflurry)
+# Resources: compute, 8 CPUs, 8042MB/cpu (~64G), 4 hours
+#   TWO-STEP LOGIC:
+#   Step 1: Build WT exclusion set from ALL WT predictions (both tools,
+#           any binding level) -- these peptides are removed from ALT.
+#   Step 2: Assign concordance tiers to clean ALT set AND WT separately:
+#     Tier 1 (High confidence):   NMP EL rank <0.5% AND MHCflurry <500nM
+#     Tier 2 (Medium confidence): NMP EL rank <2.0% AND MHCflurry <500nM
+#     Tier 3 (Discordant):        Tools disagree -- flagged, kept for ref
+# Outputs:   alt_concordance_tier1_YYYYMMDD.tsv  -- both tools strong
+#            alt_concordance_tier2_YYYYMMDD.tsv  -- moderate agreement
+#            alt_concordance_tier3_YYYYMMDD.tsv  -- discordant
+#            alt_concordance_all_YYYYMMDD.tsv    -- all tiers combined
+#            wt_concordance_tier1_YYYYMMDD.tsv   -- WT native Tier 1
+#            wt_concordance_all_YYYYMMDD.tsv     -- WT all tiers
+#            wt_exclusion_peptides_YYYYMMDD.txt  -- excluded WT peptides
+#            cross_alg_all_nmers_YYYYMMDD.tsv    -- full join (15b/c/d)
+# ---------------------------------------------------------------------
+if ! step_done "15a_generate_combined_crossanalysis_dataframes"; then
+  echo "[INFO] Step 15a: Building concordance cross-analysis (NMP x MHCflurry)..."
+  BODY_15A="Rscript ${PRESENTATION_DIR}/15a_generate_combined_crossanalysis_dataframes.R
+bash \"${SCRIPT_PATH}\" __validate_step__ 15a_generate_combined_crossanalysis_dataframes \"${STEP15_OUTPUT_DIR:-SKIP}\" 'alt_concordance_all_[0-9]{8}\.tsv' 2
+touch ${WORKDIR}/.checkpoints/15a_generate_combined_crossanalysis_dataframes.done"
+  SCRIPT_15A=$(write_job_script "15a_generate_combined_crossanalysis_dataframes" "$BODY_15A")
+  JOB_15A=$(sbatch --parsable --job-name="15a_crossanalysis_df" \
+    --partition=compute --cpus-per-task=8 --mem-per-cpu=8042 --time=4:00:00 \
+    --output=logs/15a_generate_combined_crossanalysis_dataframes_%j.log \
+    ${jobPrev:+--dependency=afterok:${jobPrev}} \
+    "$SCRIPT_15A")
+  echo "Submitted 15a_generate_combined_crossanalysis_dataframes as $JOB_15A (cpus=8, ~64G, 4h, script: $SCRIPT_15A)"
+  jobPrev="$JOB_15A"
+else
+  echo "15a_generate_combined_crossanalysis_dataframes already done."
+fi
+
+# ---------------------------------------------------------------------
+# Step 15b: Plot concordance tier figures (ALT + WT)
+# Resources: compute, 4 CPUs, 8042MB/cpu (~32G), 1 hour
+#   - Scatter: NMP EL score vs MHCflurry presentation score, by tier
+#   - Scatter: NMP EL rank vs MHCflurry affinity (nM) with thresholds
+#   - Bar chart: peptide counts per concordance tier
+#   (Figures generated for both ALT and WT)
+# Outputs:   alt_scatter_ELscore_vs_pres_YYYYMMDD.pdf
+#            alt_scatter_ELrank_vs_affinity_YYYYMMDD.pdf
+#            alt_barplot_tier_counts_YYYYMMDD.pdf
+#            wt_scatter_*.pdf  wt_barplot_*.pdf
+#            cross_analysis_summary_nmp_mf_YYYYMMDD.tsv
+# ---------------------------------------------------------------------
+if ! step_done "15b_plot_cross_analysis"; then
+  echo "[INFO] Step 15b: Generating concordance tier figures..."
+  BODY_15B="Rscript ${PRESENTATION_DIR}/15b_plot_cross_analysis.R
+bash \"${SCRIPT_PATH}\" __validate_step__ 15b_plot_cross_analysis \"${OUTPUT_DIR}/figures/step15\" 'alt_scatter_ELscore_vs_pres_[0-9]{8}\.pdf' 2
+touch ${WORKDIR}/.checkpoints/15b_plot_cross_analysis.done"
+  SCRIPT_15B=$(write_job_script "15b_plot_cross_analysis" "$BODY_15B")
+  JOB_15B=$(sbatch --parsable --job-name="15b_plot_cross_analysis" \
+    --partition=compute --cpus-per-task=4 --mem-per-cpu=8042 --time=1:00:00 \
+    --output=logs/15b_plot_cross_analysis_%j.log \
+    ${jobPrev:+--dependency=afterok:${jobPrev}} \
+    "$SCRIPT_15B")
+  echo "Submitted 15b_plot_cross_analysis as $JOB_15B (cpus=4, ~32G, 1h, script: $SCRIPT_15B)"
+  jobPrev="$JOB_15B"
+else
+  echo "15b_plot_cross_analysis already done."
+fi
+
+# ---------------------------------------------------------------------
+# Step 15c: Map n-mers back to neojunctions (ALT all tiers + WT Tier 1)
+# Resources: compute, 8 CPUs, 8042MB/cpu (~64G), 2 hours
+#   - Loads 2023_0812_complete_list_all_mers.tsv (junction reference)
+#   - For each unique peptide: str_detect(aa.seq.alt, peptide) to find
+#     which junction(s) it originated from -- gets junc.id, type, fs
+#   - Runs for ALL ALT tiers (preserves tier label in output)
+#   - Also maps WT Tier 1 for native immunopeptidome reference
+# Outputs:   alt_neoA_to_neoJ_map_YYYYMMDD.tsv  -- peptide x junction
+#            alt_immunogenic_njs_YYYYMMDD.tsv    -- per-junction summary
+#            wt_neoA_to_neoJ_map_YYYYMMDD.tsv
+#            wt_immunogenic_njs_YYYYMMDD.tsv
+# ---------------------------------------------------------------------
+if ! step_done "15c_map_nmers_to_nj"; then
+  echo "[INFO] Step 15c: Mapping n-mers to neojunctions via aa.seq.alt substring search..."
+  BODY_15C="Rscript ${PRESENTATION_DIR}/15c_map_nmers_to_nj.R
+bash \"${SCRIPT_PATH}\" __validate_step__ 15c_map_nmers_to_nj \"${STEP15_OUTPUT_DIR:-SKIP}\" 'alt_neoA_to_neoJ_map_[0-9]{8}\.tsv' 2
+touch ${WORKDIR}/.checkpoints/15c_map_nmers_to_nj.done"
+  SCRIPT_15C=$(write_job_script "15c_map_nmers_to_nj" "$BODY_15C")
+  JOB_15C=$(sbatch --parsable --job-name="15c_map_nmers_to_nj" \
+    --partition=compute --cpus-per-task=8 --mem-per-cpu=8042 --time=2:00:00 \
+    --output=logs/15c_map_nmers_to_nj_%j.log \
+    ${jobPrev:+--dependency=afterok:${jobPrev}} \
+    "$SCRIPT_15C")
+  echo "Submitted 15c_map_nmers_to_nj as $JOB_15C (cpus=8, ~64G, 2h, script: $SCRIPT_15C)"
+  jobPrev="$JOB_15C"
+else
+  echo "15c_map_nmers_to_nj already done."
+fi
+
+# ---------------------------------------------------------------------
+# Step 15d: Matrix + bed files + figures (Tier 1 only)
+# Resources: compute, 8 CPUs, 8042MB/cpu (~64G), 2 hours
+#   - Uses ONLY Tier 1 (both tools strong) from 15c mapped output
+#   - Bed files: ENST_ID|AA_START|AA_END|PEPTIDE|HLA_ALLELES
+#     -> immunogenic_peptides_YYYYMMDD.bed  (tumour-specific)
+#     -> wt_native_immunogenic_peptides_YYYYMMDD.bed   (native reference)
+#   - Matrix: neo_id (peptide|junc.id|allele) x sample (307 samples)
+#   - HLA summary, sample summary, figures by NJ type + frameshift
+# Outputs:   immunogenic_peptides_YYYYMMDD.bed
+#            wt_native_immunogenic_peptides_YYYYMMDD.bed
+#            top_neoantigens_matrix_YYYYMMDD.tsv
+#            top_neoantigens_long_YYYYMMDD.tsv
+#            hla_alleles_summary_YYYYMMDD.tsv
+#            sample_neoantigen_summary_YYYYMMDD.tsv
+#            PDFs in OUTPUT_DIR/figures/step15
+# ---------------------------------------------------------------------
 if ! step_done "15d_scores_for_nj_types"; then
-  echo "[INFO] Step 15d: Submitting with 5-day time limit..."
+  echo "[INFO] Step 15d: Building Tier 1 matrix + bed files + figures..."
   BODY_15D="Rscript ${PRESENTATION_DIR}/15d_scores_for_nj_types.R
 bash \"${SCRIPT_PATH}\" __validate_step__ 15d_scores_for_nj_types \"${STEP15_OUTPUT_DIR:-SKIP}\" 'top_neoantigens_matrix_[0-9]{8}\.tsv' 2
 touch ${WORKDIR}/.checkpoints/15d_scores_for_nj_types.done"
   SCRIPT_15D=$(write_job_script "15d_scores_for_nj_types" "$BODY_15D")
   JOB_15D=$(sbatch --parsable --job-name="15d_scores_for_nj_types" \
-    --partition=compute --cpus-per-task=24 --mem-per-cpu=8042 --time=5-00:00:00 \
+    --partition=compute --cpus-per-task=8 --mem-per-cpu=8042 --time=2:00:00 \
     --output=logs/15d_scores_for_nj_types_%j.log \
     ${jobPrev:+--dependency=afterok:${jobPrev}} \
     "$SCRIPT_15D")
-  echo "Submitted 15d_scores_for_nj_types as $JOB_15D (time=5-00:00:00 = 5 days, script: $SCRIPT_15D)"
+  echo "Submitted 15d_scores_for_nj_types as $JOB_15D (cpus=8, ~64G, 2h, script: $SCRIPT_15D)"
   jobPrev="$JOB_15D"
 else
   echo "15d_scores_for_nj_types already done."
 fi
 
+# ---------------------------------------------------------------------
+# Phase 2 gate
+# ---------------------------------------------------------------------
 if ! step_done "phase2_gate"; then
   jobPrev=$(submit_phase_gate "phase2" "$jobPrev")
 else
   echo "phase2_gate already done."
 fi
 
-echo "=== Submission complete. phase1 (01-10) -> phase1_gate -> phase2 (11-15e) -> phase2_gate. ==="
+echo "=== Submission complete. phase1 (01-10) -> phase1_gate -> phase2 (11-15d) -> phase2_gate. ==="
