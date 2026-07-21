@@ -58,6 +58,7 @@ Altered peptide sequences are generated and evaluated against patient-specific H
 
 Predictions are performed using:
 
+- NetMHCPan4.2
 - MHCFlurry 2.0
 
 Reported outputs include:
@@ -110,6 +111,7 @@ STAR
 Salmon
 IRFinder-S
 Python >= 3.10
+NetMHCPan4.2
 MHCFlurry 2.0
 R >= 4.3
 ```
