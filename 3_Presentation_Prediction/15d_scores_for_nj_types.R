@@ -93,8 +93,19 @@ alt_map <- fread(file.path(directory_15,
 cat(sprintf("[INFO] ALT map rows: %d\n", nrow(alt_map)))
 
 # Filter to Tier 1 only for matrix and bed
+alt_map[, concordance_tier := gsub('^"|"$', "", concordance_tier)]
 alt_t1 <- alt_map[concordance_tier == "Tier1_HighConfidence"]
-cat(sprintf("[INFO] ALT Tier 1 rows: %d\n", nrow(alt_t1)))
+cat(sprintf("[INFO] ALT Tier 1 rows before filter: %d\n", nrow(alt_t1)))
+
+# Remove low-complexity peptides (homopolymer/repetitive sequences e.g. AAAAAAAAA)
+# A peptide is low-complexity if any single amino acid > 60% of the sequence
+is_low_complexity <- function(pep) {
+  chars <- strsplit(as.character(pep), "")[[1]]
+  max(table(chars)) / length(chars) > 0.6
+}
+alt_t1 <- alt_t1[!sapply(peptide, is_low_complexity)]
+
+cat(sprintf("[INFO] ALT Tier 1 rows after low-complexity filter: %d\n", nrow(alt_t1)))
 cat(sprintf("[INFO] ALT Tier 1 unique peptides:   %d\n", uniqueN(alt_t1$peptide)))
 cat(sprintf("[INFO] ALT Tier 1 unique junctions:  %d\n", uniqueN(alt_t1$junc.id)))
 
@@ -103,6 +114,7 @@ wt_map_file <- file.path(directory_15,
                           paste0("wt_neoA_to_neoJ_map_", date_15c, ".tsv"))
 wt_t1 <- if (file.exists(wt_map_file)) {
   dt <- fread(wt_map_file, na.strings = c("", "NA"), quote = "")
+  dt[, concordance_tier := gsub('^"|"$', "", concordance_tier)]
   dt[concordance_tier == "Tier1_HighConfidence"]
 } else {
   cat("[WARN] WT map file not found -- skipping WT bed\n")
@@ -182,7 +194,7 @@ if (length(coord_files_exist) == 0) {
     setorder(bed, ENST_ID, AA_START)
 
     fwrite(bed, file.path(output_dir, outfile),
-           sep = "\t", col.names = TRUE, quote = FALSE)
+           sep = "\t", col.names = FALSE, quote = FALSE)
     cat(sprintf("[INFO] %s bed: %d rows | %d peptides | %d transcripts -> %s\n",
                 label, nrow(bed), uniqueN(bed$PEPTIDE),
                 uniqueN(bed$ENST_ID), outfile))
@@ -220,10 +232,18 @@ if (length(coord_files_exist) == 0) {
                          all.x = TRUE, allow.cartesian = TRUE)
       wt_joined <- wt_joined[!is.na(aa.seq.wt)]
 
-      # Find AA start position of peptide in wt sequence
+      # Find AA start position of each peptide within its corresponding wt sequence.
+      # Use vectorised stringr::str_locate for speed and correctness.
+      # Works row-by-row: each peptide is searched in its own aa.seq.wt.
       wt_joined[, aa_start := {
-        pos <- regexpr(peptide, aa.seq.wt, fixed = TRUE)
-        fifelse(pos > 0, as.integer(pos), NA_integer_)
+        peps <- as.character(peptide)
+        seqs <- as.character(aa.seq.wt)
+        pos  <- integer(length(peps))
+        for (i in seq_along(peps)) {
+          p <- regexpr(peps[i], seqs[i], fixed = TRUE)
+          pos[i] <- if (p > 0L) as.integer(p) else NA_integer_
+        }
+        pos
       }]
       wt_joined <- wt_joined[!is.na(aa_start)]
       wt_joined[, aa_end := aa_start + nchar(peptide) - 1L]
@@ -244,7 +264,7 @@ if (length(coord_files_exist) == 0) {
 
         wt_bed_file <- paste0("wt_native_immunogenic_peptides_", current_date, ".bed")
         fwrite(wt_bed, file.path(output_dir, wt_bed_file),
-               sep = "	", col.names = TRUE, quote = FALSE)
+               sep = "\t", col.names = FALSE, quote = FALSE)
         cat(sprintf("[INFO] WT bed: %d rows | %d peptides | %d transcripts -> %s\n",
                     nrow(wt_bed), uniqueN(wt_bed$PEPTIDE),
                     uniqueN(wt_bed$ENST_ID), wt_bed_file))
